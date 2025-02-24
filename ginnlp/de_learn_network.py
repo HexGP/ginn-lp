@@ -101,8 +101,11 @@ def set_model_l1_l2(model, l1, l2):
             layer.kernel_regularizer.set_l1_l2(l1, l2)
 
 
-def log_activation(in_x):
-    return tf.math.log(in_x)
+# def log_activation(in_x):
+#     return tf.math.log(in_x)
+
+def log_activation(x):
+    return tf.math.sign(x) * tf.math.log(1 + tf.math.abs(x))
 
 
 def abs_activation(in_x):
