@@ -372,8 +372,8 @@ def eql_model_v3_multioutput(input_size, opt, ln_blocks=(3,), lin_blocks=(1,), o
             )
             
             output_layer = layers.Dense(1, activation='linear',
-                                       kernel_regularizer=L1L2_m(l1=0.0, l2=0.0),  # No regularization for diversity
-                                       bias_regularizer=L1L2_m(l1=0.0, l2=0.0),   # No regularization for diversity
+                                       kernel_regularizer=L1L2_m(l1=l1_reg, l2=l2_reg),
+                                       bias_regularizer=L1L2_m(l1=l1_reg, l2=l2_reg),
                                        kernel_constraint=PosConstraint(),
                                        kernel_initializer=different_init,
                                        use_bias=False,
@@ -393,6 +393,7 @@ def eql_model_v3_multioutput(input_size, opt, ln_blocks=(3,), lin_blocks=(1,), o
         out_ln_dense_units = [
             layers.Dense(1, use_bias=False,
                          kernel_initializer=initializers.RandomUniform(minval=0.1, maxval=0.9, seed=out_idx*100+i),
+                        #  kernel_initializer=initializers.Identity(gain=1.0), #Original initialization for each output unit (no seed)
                          trainable=False,  # Keep non-trainable for stability
                          activation=log_activation,
                          name=f'out{out_idx}_ln_{i}')(shared_features)
@@ -406,13 +407,13 @@ def eql_model_v3_multioutput(input_size, opt, ln_blocks=(3,), lin_blocks=(1,), o
             
         # Exponential activation to get polynomial terms
         out_ln_dense = layers.Dense(1,
-                                   kernel_regularizer=L1L2_m(l1=1e-5, l2=1e-5, int_reg=0.0),  # REDUCE regularization
+                                   kernel_regularizer=L1L2_m(l1=l1_reg, l2=l2_reg, int_reg=0.0),
                                    use_bias=False, activation=activations.exponential,
                                    name=f'out{out_idx}_ln_dense')(out_ln_concat)
-        # Linear head with reduced regularization
+        # Linear head with standard regularization
         out_linear = layers.Dense(1, activation='linear', 
-                                 kernel_regularizer=L1L2_m(l1=1e-5, l2=1e-5),  # REDUCE regularization
-                                 bias_regularizer=L1L2_m(l1=1e-5, l2=1e-5),   # REDUCE regularization
+                                 kernel_regularizer=L1L2_m(l1=l1_reg, l2=l2_reg),
+                                 bias_regularizer=L1L2_m(l1=l1_reg, l2=l2_reg),
                                  name=f'output_{out_idx}')(out_ln_dense)
         outputs.append(out_linear)
 
