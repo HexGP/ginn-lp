@@ -6,6 +6,7 @@ import tensorflow as tf
 from tensorflow.keras import backend as K
 
 import numpy as np
+from ginnlp.utils import get_sympy_expr_v3, get_multioutput_sympy_expr_v2
 
 
 def my_tf_round(x, decimals=0):
@@ -14,10 +15,9 @@ def my_tf_round(x, decimals=0):
 
 
 class PosConstraint(tf.keras.constraints.Constraint):
-    """Constrains weight tensors to be positive"""
-
+    """Constrains weight tensors to be positive (wider range)"""
     def __call__(self, w):
-        return tf.clip_by_value(w, 0.001, 100)
+        return tf.clip_by_value(w, 0.0001, 100.0)
 
 
 class IntConstraint(tf.keras.constraints.Constraint):
@@ -101,11 +101,12 @@ def set_model_l1_l2(model, l1, l2):
             layer.kernel_regularizer.set_l1_l2(l1, l2)
 
 
-# def log_activation(in_x):
-#     return tf.math.log(in_x)
+# Original Log Activation
+def log_activation(in_x):
+    return tf.math.log(in_x)
 
-def log_activation(x):
-    return tf.math.sign(x) * tf.math.log(1 + tf.math.abs(x))
+# def log_activation(in_x):
+#     return tf.math.sign(in_x) * tf.math.log(1 + tf.math.abs(in_x))
 
 
 def abs_activation(in_x):
@@ -330,6 +331,102 @@ def copy_tf_model(cur_model):
     model_new = tf.keras.models.clone_model(cur_model)
     model_new.set_weights(cur_model.get_weights())
     return model_new
+
+
+def eql_model_v3_multioutput(input_size, opt, ln_blocks=(3,), lin_blocks=(1,), output_ln_blocks=3, num_outputs=2, compile=True, l1_reg=0, l2_reg=0):
+    """
+    Build a multi-output GINN model with shared PTA layers, then output-specific PTA blocks and linear heads.
+    - input_size: number of input variables
+    - opt: optimizer
+    - ln_blocks: tuple, number of PTA blocks per shared layer
+    - lin_blocks: tuple, number of output units per shared layer (should match ln_blocks)
+    - output_ln_blocks: number of PTA blocks per output head
+    - num_outputs: number of outputs (tasks)
+    - compile: whether to compile the model
+    - l1_reg, l2_reg: regularization parameters
+    """
+    # Shared input (list of Input layers, as in original code)
+    inputs_x = [layers.Input(shape=(1,)) for i in range(input_size)]
+    cur_input = inputs_x
+
+    # Shared PTA layers (as in eql_model_v3)
+    for depth_idx in range(len(ln_blocks)):
+        cur_ln_blocks = ln_blocks[depth_idx]
+        cur_output_units = lin_blocks[depth_idx]
+        cur_ln_dense_units = [
+            eql_ln_block(cur_input, layer_num=str(depth_idx) + '_' + str(i)) for i in range(cur_ln_blocks)
+        ]
+        if cur_ln_blocks == 1:
+            cur_ln_dense_concat = cur_ln_dense_units[0]
+        else:
+            cur_ln_dense_concat = layers.Concatenate()(cur_ln_dense_units)
+        
+        # Create output_dense layers with DIFFERENT weight initializations for each unit
+        cur_output_dense = []
+        for i in range(cur_output_units):
+            # Use different random seeds for each output unit to ensure different initial weights
+            different_init = initializers.RandomUniform(
+                minval=0.5 + i*0.1,  # Different min values for each unit
+                maxval=1.0 + i*0.1,  # Different max values for each unit
+                seed=i+42  # Different seed for each unit
+            )
+            
+            output_layer = layers.Dense(1, activation='linear',
+                                       kernel_regularizer=L1L2_m(l1=0.0, l2=0.0),  # No regularization for diversity
+                                       bias_regularizer=L1L2_m(l1=0.0, l2=0.0),   # No regularization for diversity
+                                       kernel_constraint=PosConstraint(),
+                                       kernel_initializer=different_init,
+                                       use_bias=False,
+                                       name='output_dense_{}_{}'.format(depth_idx, i))(cur_ln_dense_concat)
+            cur_output_dense.append(output_layer)
+        
+        cur_input = cur_input + cur_output_dense
+
+    # At this point, cur_input is a list: original inputs + all output_dense from last shared layer
+    # We want to concatenate only the outputs of the last shared layer for the next step
+    shared_features = layers.Concatenate()(cur_input[input_size:])
+
+    # For each output, add output-specific PTA blocks and a linear head
+    outputs = []
+    for out_idx in range(num_outputs):
+        # Output-specific PTA blocks
+        out_ln_dense_units = [
+            layers.Dense(1, use_bias=False,
+                         kernel_initializer=initializers.Identity(gain=1.0),
+                         trainable=False,
+                         activation=log_activation,
+                         name=f'out{out_idx}_ln_{i}')(shared_features)
+            for i in range(output_ln_blocks)
+        ]
+            
+        if output_ln_blocks == 1:
+            out_ln_concat = out_ln_dense_units[0]
+        else:
+            out_ln_concat = layers.Concatenate()(out_ln_dense_units)
+            
+        # Exponential activation to get polynomial terms
+        out_ln_dense = layers.Dense(1,
+                                   kernel_regularizer=L1L2_m(l1=1e-4, l2=1e-4, int_reg=0.0),  # Add regularization to encourage feature usage
+                                   use_bias=False, activation=activations.exponential,
+                                   name=f'out{out_idx}_ln_dense')(out_ln_concat)
+        # Linear head with regularization to encourage using all features
+        out_linear = layers.Dense(1, activation='linear', 
+                                 kernel_regularizer=L1L2_m(l1=1e-4, l2=1e-4),  # Add regularization
+                                 bias_regularizer=L1L2_m(l1=1e-4, l2=1e-4),   # Add regularization
+                                 name=f'output_{out_idx}')(out_ln_dense)
+        outputs.append(out_linear)
+
+    model = Model(inputs=inputs_x, outputs=outputs, name='eql_model_multioutput')
+    if compile:
+        model.compile(optimizer=opt, loss='mean_squared_error', metrics=['mean_squared_error'])
+    return model
+
+
+def get_multioutput_sympy_expr(model, input_size, output_ln_blocks, round_digits=3):
+    """
+    Extract and print symbolic equations for each output of a multi-output GINN model.
+    """
+    get_multioutput_sympy_expr_v2(model, input_size, output_ln_blocks, round_digits)
 
 
 if __name__ == "__main__":
