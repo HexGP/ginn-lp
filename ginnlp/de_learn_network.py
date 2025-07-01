@@ -389,11 +389,11 @@ def eql_model_v3_multioutput(input_size, opt, ln_blocks=(3,), lin_blocks=(1,), o
     # For each output, add output-specific PTA blocks and a linear head
     outputs = []
     for out_idx in range(num_outputs):
-        # Output-specific PTA blocks
+        # Output-specific PTA blocks - Different initialization but non-trainable for stability
         out_ln_dense_units = [
             layers.Dense(1, use_bias=False,
-                         kernel_initializer=initializers.Identity(gain=1.0),
-                         trainable=False,
+                         kernel_initializer=initializers.RandomUniform(minval=0.1, maxval=0.9, seed=out_idx*100+i),
+                         trainable=False,  # Keep non-trainable for stability
                          activation=log_activation,
                          name=f'out{out_idx}_ln_{i}')(shared_features)
             for i in range(output_ln_blocks)
@@ -406,13 +406,13 @@ def eql_model_v3_multioutput(input_size, opt, ln_blocks=(3,), lin_blocks=(1,), o
             
         # Exponential activation to get polynomial terms
         out_ln_dense = layers.Dense(1,
-                                   kernel_regularizer=L1L2_m(l1=1e-4, l2=1e-4, int_reg=0.0),  # Add regularization to encourage feature usage
+                                   kernel_regularizer=L1L2_m(l1=1e-5, l2=1e-5, int_reg=0.0),  # REDUCE regularization
                                    use_bias=False, activation=activations.exponential,
                                    name=f'out{out_idx}_ln_dense')(out_ln_concat)
-        # Linear head with regularization to encourage using all features
+        # Linear head with reduced regularization
         out_linear = layers.Dense(1, activation='linear', 
-                                 kernel_regularizer=L1L2_m(l1=1e-4, l2=1e-4),  # Add regularization
-                                 bias_regularizer=L1L2_m(l1=1e-4, l2=1e-4),   # Add regularization
+                                 kernel_regularizer=L1L2_m(l1=1e-5, l2=1e-5),  # REDUCE regularization
+                                 bias_regularizer=L1L2_m(l1=1e-5, l2=1e-5),   # REDUCE regularization
                                  name=f'output_{out_idx}')(out_ln_dense)
         outputs.append(out_linear)
 

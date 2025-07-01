@@ -11,7 +11,15 @@ df = pd.read_csv(csv_path)
 X = df.iloc[:, :6].values.astype(np.float32)  # First 6 columns as input
 Y = df.iloc[:, 6:8].values.astype(np.float32) # Next 2 columns as targets
 
-# 2. Analyze target correlation
+# 2. Use raw values directly (no scaling) - all values are already positive
+print("Input ranges:")
+for i in range(6):
+    print(f"X{i+1}: {X[:, i].min():.2f} to {X[:, i].max():.2f}")
+print("\nTarget ranges:")
+for i in range(2):
+    print(f"Y{i+1}: {Y[:, i].min():.2f} to {Y[:, i].max():.2f}")
+    
+# 3. Analyze target correlation
 print("=== TARGET CORRELATION ANALYSIS ===")
 target_corr = np.corrcoef(Y.T)[0, 1]
 print(f"Correlation between targets: {target_corr:.4f}")
@@ -61,9 +69,9 @@ print("\n=== MODEL ARCHITECTURE ===")
 input_size = 6
 num_outputs = 2
 
-# Use the original working configuration
-ln_blocks = (3,)            # 1 shared layer, same as original working version
-lin_blocks = (1,)           # Must match ln_blocks
+# Use 2 shared layers with more features
+ln_blocks = (3, 3)          # 2 shared layers: both with 3 PTA blocks = 6 shared features total
+lin_blocks = (1, 1)         # Must match ln_blocks
 output_ln_blocks = 4        # Same as original
 
 print(f"Shared layers: {len(ln_blocks)}")
@@ -75,7 +83,7 @@ decay_steps = 1000          # Same as original
 init_lr = 0.01              # Same as original
 opt = eql_opt(decay_steps=decay_steps, init_lr=init_lr)
 
-# 6. Build model with NO regularization (like original)
+# 6. Build model with reduced regularization
 model = eql_model_v3_multioutput(
     input_size=input_size,
     opt=opt,
@@ -84,8 +92,8 @@ model = eql_model_v3_multioutput(
     output_ln_blocks=output_ln_blocks,
     num_outputs=num_outputs,
     compile=False,  # We'll compile manually
-    l1_reg=0.0,    # NO regularization like original
-    l2_reg=0.0     # NO regularization like original
+    l1_reg=1e-5,   # REDUCED L1 regularization
+    l2_reg=1e-5    # REDUCED L2 regularization
 )
 
 # 7. Compile with custom metrics
@@ -182,6 +190,6 @@ if 'loss' in history.history and not np.any(np.isnan(history.history['loss'])):
 else:
     print("Training failed due to NaN values")
 print("Model architecture:")
-print("- Using original working configuration")
-print("- No regularization to avoid NaN issues")
-print("- Simple training setup") 
+print("- Using 2 shared layers (3, 3) = 6 shared features total")
+print("- Non-trainable output-specific PTA blocks with diverse initialization")
+print("- REDUCED L1/L2 regularization (1e-5) for feature diversity") 
