@@ -333,7 +333,7 @@ def copy_tf_model(cur_model):
     return model_new
 
 
-def eql_model_v3_multioutput(input_size, opt, ln_blocks=(3,), lin_blocks=(1,), output_ln_blocks=3, num_outputs=2, compile=True, l1_reg=0, l2_reg=0):
+def eql_model_v3_multioutput(input_size, opt, ln_blocks=(3,), lin_blocks=(1,), output_ln_blocks=3, num_outputs=2, compile=True, l1_reg=0, l2_reg=0, output_l1_reg=0.01, output_l2_reg=0.01):
     """
     Build a multi-output GINN model with shared PTA layers, then output-specific PTA blocks and linear heads.
     - input_size: number of input variables
@@ -343,7 +343,8 @@ def eql_model_v3_multioutput(input_size, opt, ln_blocks=(3,), lin_blocks=(1,), o
     - output_ln_blocks: number of PTA blocks per output head
     - num_outputs: number of outputs (tasks)
     - compile: whether to compile the model
-    - l1_reg, l2_reg: regularization parameters
+    - l1_reg, l2_reg: regularization parameters for shared layers
+    - output_l1_reg, output_l2_reg: stronger regularization specifically for output linear heads to encourage simpler equations
     """
     # Shared input (list of Input layers, as in original code)
     inputs_x = [layers.Input(shape=(1,)) for i in range(input_size)]
@@ -410,10 +411,11 @@ def eql_model_v3_multioutput(input_size, opt, ln_blocks=(3,), lin_blocks=(1,), o
                                    kernel_regularizer=L1L2_m(l1=l1_reg, l2=l2_reg, int_reg=0.0),
                                    use_bias=False, activation=activations.exponential,
                                    name=f'out{out_idx}_ln_dense')(out_ln_concat)
-        # Linear head with standard regularization
+        # Linear head with STRONGER regularization to encourage simpler equations
+        # This is the key addition: stronger L1/L2 regularization on the final coefficients
         out_linear = layers.Dense(1, activation='linear', 
-                                 kernel_regularizer=L1L2_m(l1=l1_reg, l2=l2_reg),
-                                 bias_regularizer=L1L2_m(l1=l1_reg, l2=l2_reg),
+                                 kernel_regularizer=L1L2_m(l1=output_l1_reg, l2=output_l2_reg),
+                                 bias_regularizer=L1L2_m(l1=output_l1_reg, l2=output_l2_reg),
                                  name=f'output_{out_idx}')(out_ln_dense)
         outputs.append(out_linear)
 

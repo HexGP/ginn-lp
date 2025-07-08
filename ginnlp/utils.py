@@ -176,14 +176,14 @@ def get_multioutput_sympy_expr_v2(model, input_size, output_ln_blocks, round_dig
         shared_feature_names.append(f'F_{feat_idx+1}')
         shared_feature_exprs.append(feat_expr)
     # Print shared features
-    print('\nShared features (from last shared PTA layer):')
-    for name, expr in zip(shared_feature_names, shared_feature_exprs):
-        print(f"{name} = {expr}")
+    # print('\nShared features (from last shared PTA layer):')
+    # for name, expr in zip(shared_feature_names, shared_feature_exprs):
+    #     print(f"{name} = {expr}")
 
     # --- 2. Print both output equations in terms of F_i ---
     shared_syms = [symbols(f'F_{i+1}', positive=True) for i in range(num_shared_features)]
     for out_idx in range(2):  # Assuming 2 outputs
-        print(f"\nRecovered equation for output {out_idx} (in terms of F_i):")
+        # print(f"\nRecovered equation for output {out_idx} (in terms of F_i):")
         out_ln_weights = []
         for i in range(output_ln_blocks):
             layer_name = f'out{out_idx}_ln_{i}'
@@ -204,7 +204,7 @@ def get_multioutput_sympy_expr_v2(model, input_size, output_ln_blocks, round_dig
         if len(output_weights) > 1:
             final_expr += output_weights[1][0]
         final_expr = round_sympy_expr(final_expr, round_digits=round_digits)
-        print(final_expr)
+        # print(final_expr)
         # --- 3. Substitute F_i in terms of X_j ---
         print(f"\nRecovered equation for output {out_idx} (in terms of X_j):")
         expr_sub = final_expr

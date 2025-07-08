@@ -4,6 +4,7 @@ import tensorflow as tf
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import mean_squared_error, mean_absolute_percentage_error
 from ginnlp.de_learn_network import eql_model_v3_multioutput, eql_opt, get_multioutput_sympy_expr
+from tensorflow.keras.callbacks import EarlyStopping
 import time
 
 def weighted_multi_task_loss(task_weights):
@@ -78,23 +79,31 @@ def run_single_experiment(task_weights, run_number, verbose=False):
     model.compile(optimizer=opt, loss=custom_loss, metrics=['mean_squared_error', 'mean_absolute_percentage_error'])
 
     # 6. Train model (suppress output unless verbose)
+    early_stopping = EarlyStopping(
+        monitor='val_loss',
+        patience=100,
+        restore_best_weights=True,
+        verbose=0
+    )
     if verbose:
         history = model.fit(
             [X_scaled[:, i].reshape(-1, 1) for i in range(input_size)],
             [Y_scaled[:, i].reshape(-1, 1) for i in range(num_outputs)],
-            epochs=100,
+            epochs=10000,
             batch_size=32,
             validation_split=0.2,
-            verbose=0
+            verbose=0,
+            callbacks=[early_stopping]
         )
     else:
         history = model.fit(
             [X_scaled[:, i].reshape(-1, 1) for i in range(input_size)],
             [Y_scaled[:, i].reshape(-1, 1) for i in range(num_outputs)],
-            epochs=100,
+            epochs=10000,
             batch_size=32,
             validation_split=0.2,
-            verbose=0
+            verbose=0,
+            callbacks=[early_stopping]
         )
 
     # 7. Calculate predictions and convert back to original scale
