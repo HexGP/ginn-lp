@@ -9,7 +9,11 @@ import matplotlib.pyplot as plt
 # 1. Load data
 csv_path = "data/ENB2012_data.csv"  # Use original data file
 df = pd.read_csv(csv_path)
-X = df.iloc[:, :8].values.astype(np.float32)  # First 8 columns as input (X1-X8)
+
+# Feature selection: Change this number to use different number of features
+num_features = 8  # Change this to 5, 6, 7, or 8 to use more features
+
+X = df.iloc[:, :num_features].values.astype(np.float32)  # First num_features columns as input
 Y = df.iloc[:, 8:10].values.astype(np.float32) # target_1 and target_2 columns
 
 # 2. Apply scaling - choose one approach:
@@ -27,10 +31,10 @@ X_scaled = scaler_X.fit_transform(X)
 Y_scaled = scaler_Y.fit_transform(Y)
 
 print("Original input ranges:")
-for i in range(8):
+for i in range(num_features):
     print(f"X{i+1}: {X[:, i].min():.2f} to {X[:, i].max():.2f}")
 print("\nScaled input ranges:")
-for i in range(8):
+for i in range(num_features):
     print(f"X{i+1}: {X_scaled[:, i].min():.2f} to {X_scaled[:, i].max():.2f}")
 
 print("\nOriginal target ranges:")
@@ -41,7 +45,7 @@ for i in range(2):
     print(f"Y{i+1}: {Y_scaled[:, i].min():.2f} to {Y_scaled[:, i].max():.2f}")
 
 # 3. Use simple architecture that was working well
-input_size = 8
+input_size = num_features
 num_outputs = 2
 ln_blocks = (4, 4)          # 2 shared layers: both with 4 PTA blocks
 lin_blocks = (1, 1)         # Must match ln_blocks
@@ -145,6 +149,9 @@ results = model.evaluate(
 
 # 7. Calculate predictions and convert back to original scale for metrics
 predictions_scaled = model.predict([X_scaled[:, i].reshape(-1, 1) for i in range(input_size)])
+# Save predictions as a single (n_samples, 2) array for both outputs
+np.save('nn_preds_scaled.npy', np.column_stack(predictions_scaled))
+print("Saved neural network predictions to nn_preds_scaled.npy")
 predictions_original = scaler_Y.inverse_transform(np.column_stack(predictions_scaled))
 
 # Calculate metrics on both scaled and original scale
