@@ -83,12 +83,12 @@ LIN_BLOCKS_SHARED = (1, 1)            # must match per GINN builder
 OUTPUT_LN_BLOCKS = 4                  # you said “their own four” per head; set 4
 L1 = 1e-3; L2 = 1e-3
 OUT_L1 = 0.2; OUT_L2 = 0.1
-INIT_LR = 1e-2; DECAY_STEPS = 1000
-BATCH_SIZE = 32
+INIT_LR = 1e-4; DECAY_STEPS = 1000  # Reduced from 1e-2 for stability
+BATCH_SIZE = 64  # Increased from 32 for more stable gradients
 EPOCHS = 10000
 VAL_SPLIT = 0.2
 PATIENCE = 100
-TASK_WEIGHTS = [0.5, 0.5]             # adjust weighting if one target is more important
+TASK_WEIGHTS = [0.8, 0.2]             # Give more weight to stable output (0) for training stability
 # ==========================================
 
 
@@ -540,20 +540,20 @@ class EquationSyncCallback(Callback):
             print(f"[EqSync @ epoch {epoch}] Equation sync failed: {e}")
 
 
-# ---------- Loss (weighted multitask MSE with mild regularization on outputs) ----------
+# ---------- Loss (weighted multitask MSE with scale normalization) ----------
 def faithfulness_aware_loss(task_weights, faithfulness_weight=0.0):
     def loss(y_true, y_pred):
-        # Simple approach: just use standard MSE loss for now
-        # This will help us isolate if the issue is in our custom loss function
         if isinstance(y_true, (list, tuple)) and isinstance(y_pred, (list, tuple)):
-            # Handle list of tensors case
             total_loss = tf.constant(0.0, dtype=tf.float32)
             for i in range(len(task_weights)):
-                mse_loss = tf.keras.losses.mse(y_true[i], y_pred[i])
-                total_loss += task_weights[i] * mse_loss
+                # Normalize by target variance to handle scale differences
+                target_var = tf.math.reduce_variance(y_true[i]) + 1e-8
+                normalized_mse = tf.keras.losses.mse(y_true[i], y_pred[i]) / target_var
+                # Clip extreme values for stability
+                normalized_mse = tf.clip_by_value(normalized_mse, 0.0, 100.0)
+                total_loss += task_weights[i] * normalized_mse
             return total_loss
         else:
-            # Fallback to standard MSE
             return tf.keras.losses.mse(y_true, y_pred)
     return loss
 
@@ -590,6 +590,8 @@ def main():
 
         # 4) Build GINN model (use it directly; no wrapper)
         opt = eql_opt(decay_steps=DECAY_STEPS, init_lr=INIT_LR)
+        # Add gradient clipping to prevent explosions
+        opt.clipnorm = 1.0
         model = eql_model_v3_multioutput(
             input_size=num_features,
             opt=opt,
@@ -598,9 +600,9 @@ def main():
             output_ln_blocks=OUTPUT_LN_BLOCKS,
             num_outputs=num_outputs,
             compile=False,
-            # use zeros, not None (your L1L2_m wraps these in tf.Variable)
-            l1_reg=0.0, l2_reg=0.0,
-            output_l1_reg=0.0, output_l2_reg=0.0,
+            # Add mild regularization to prevent overfitting
+            l1_reg=1e-5, l2_reg=1e-5,
+            output_l1_reg=1e-4, output_l2_reg=1e-4,
         )
 
         # 5) Callbacks
@@ -614,12 +616,23 @@ def main():
             ridge_lambda=RIDGE_LAMBDA
         )
         es = EarlyStopping(monitor="val_loss", patience=PATIENCE, restore_best_weights=True, verbose=1)
+        
+        # Add learning rate reduction for stability
+        lr_scheduler = tf.keras.callbacks.ReduceLROnPlateau(
+            monitor='val_loss',
+            factor=0.5,
+            patience=50,
+            min_lr=1e-6,
+            verbose=1
+        )
 
         # 6) Compile (multi-output: one loss per head + weights)
         model.compile(
             optimizer=opt,
             loss=['mse'] * num_outputs,          # ['mse','mse']
             loss_weights=TASK_WEIGHTS,           # e.g. [0.5, 0.5]
+            # Add stability measures
+            jit_compile=False,                   # Disable XLA for stability
             # metrics=['mse']  # Simplified: single metric for all outputs
             # run_eagerly=False  # leave default; flip to True only if you need step-by-step debug
         )
@@ -658,7 +671,7 @@ def main():
                 batch_size=BATCH_SIZE,
                 validation_split=VAL_SPLIT,
                 verbose=1,
-                callbacks=[es, eqsync]
+                callbacks=[es, eqsync, lr_scheduler]
             )
             print("DEBUG: Training completed successfully!")
             
