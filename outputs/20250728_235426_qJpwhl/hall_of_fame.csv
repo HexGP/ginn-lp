@@ -1,4 +1,0 @@
-Complexity,Loss,Equation
-2,15.297806,"sqrt(1.3042035)"
-3,1.1481477,"log(x3)"
-5,0.52711684,"sqrt(sqrt(x2)) + x0"

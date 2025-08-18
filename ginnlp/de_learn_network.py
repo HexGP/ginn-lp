@@ -427,9 +427,9 @@ def eql_model_v3_multioutput(input_size, opt, ln_blocks=(3,), lin_blocks=(1,), o
 
 def get_multioutput_sympy_expr(model, input_size, output_ln_blocks, round_digits=3):
     """
-    Extract and print symbolic equations for each output of a multi-output GINN model.
+    Extract and return symbolic equations for each output of a multi-output GINN model.
     """
-    get_multioutput_sympy_expr_v2(model, input_size, output_ln_blocks, round_digits)
+    return get_multioutput_sympy_expr_v2(model, input_size, output_ln_blocks, round_digits)
 
 
 if __name__ == "__main__":

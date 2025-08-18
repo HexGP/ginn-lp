@@ -1,10 +1,17 @@
 import pandas as pd
 import numpy as np
 import tensorflow as tf
-from sklearn.preprocessing import MinMaxScaler
 from ginnlp.de_learn_network import eql_model_v3_multioutput, eql_opt, get_multioutput_sympy_expr
 from tensorflow.keras.callbacks import EarlyStopping
 import matplotlib.pyplot as plt
+from scipy.ndimage import gaussian_filter1d
+from scipy.signal import savgol_filter
+import os
+
+# Create model output directory
+model_dir = "outputs/model"
+os.makedirs(model_dir, exist_ok=True)
+print(f"Output directory: {model_dir}")
 
 # 1. Load data - automatically detects features and targets from ANY dataset
 # Just change the csv_path to use any dataset - the script will automatically detect:
@@ -80,38 +87,115 @@ print(f"Number of features: {num_features}")
 print(f"Number of outputs: {num_outputs}")
 print(f"Dataset shape: {X.shape}")
 
-# 2. Apply scaling - choose one approach:
+# 2. Apply data smoothing instead of scaling - choose one approach:
 
-# Approach 1: MinMaxScaler (current)
-scaler_X = MinMaxScaler(feature_range=(0.1, 10.0))  # Avoid exact zeros
-scaler_Y = MinMaxScaler(feature_range=(0.1, 10.0))  # Avoid exact zeros
+# Approach 1: Gaussian Smoothing (current - preserves data relationships)
 
-# Approach 2: StandardScaler (alternative - uncomment to use)
-# from sklearn.preprocessing import StandardScaler
-# scaler_X = StandardScaler()
-# scaler_Y = StandardScaler()
+def smooth_features_gaussian(X, sigma=1.0):
+    """Apply Gaussian smoothing to features to reduce noise while preserving relationships"""
+    X_smoothed = np.copy(X)
+    for i in range(X.shape[1]):
+        # Apply 1D Gaussian filter to each feature column
+        X_smoothed[:, i] = gaussian_filter1d(X[:, i], sigma=sigma)
+    return X_smoothed
 
-X_scaled = scaler_X.fit_transform(X)
-Y_scaled = scaler_Y.fit_transform(Y)
+def smooth_features_savgol(X, window_length=5, polyorder=2):
+    """Apply Savitzky-Golay smoothing to features"""
+    X_smoothed = np.copy(X)
+    for i in range(X.shape[1]):
+        # Apply Savitzky-Golay filter to each feature column
+        # Handle edge cases by using valid window sizes
+        wl = min(window_length, len(X) // 2 * 2 + 1)  # Must be odd
+        if wl >= 3:
+            X_smoothed[:, i] = savgol_filter(X[:, i], wl, polyorder)
+        else:
+            X_smoothed[:, i] = X[:, i]  # Keep original if too few points
+    return X_smoothed
+
+def smooth_targets_gaussian(Y, sigma=0.5):
+    """Apply lighter Gaussian smoothing to targets"""
+    Y_smoothed = np.copy(Y)
+    for i in range(Y.shape[1]):
+        Y_smoothed[:, i] = gaussian_filter1d(Y[:, i], sigma=sigma)
+    return Y_smoothed
+
+# Choose smoothing method
+smoothing_method = "savgol"  # Options: "gaussian", "savgol"
+
+if smoothing_method == "gaussian":
+    # Apply Gaussian smoothing to ALL features equally
+    X_smoothed = smooth_features_gaussian(X, sigma=3.0)
+    Y_smoothed = smooth_targets_gaussian(Y, sigma=1.5)
+    print("Applied Gaussian smoothing (sigma=3.0 for ALL features, 1.5 for ALL targets)")
+elif smoothing_method == "savgol":
+    # Apply Savitzky-Golay smoothing to ALL features equally
+    X_smoothed = smooth_features_savgol(X, window_length=15, polyorder=3)
+    Y_smoothed = smooth_targets_gaussian(Y, sigma=1.5)
+    print("Applied Savitzky-Golay smoothing (window=15, polyorder=3) to ALL features equally")
+
+# Handle any remaining zeros or very small values that might cause issues
+eps = 1e-8
+X_smoothed = np.where(np.abs(X_smoothed) < eps, eps, X_smoothed)
+Y_smoothed = np.where(np.abs(Y_smoothed) < eps, eps, Y_smoothed)
+
+# Ensure ALL values remain positive (Savitzky-Golay can create negatives)
+min_positive = 0.01  # Minimum positive value
+X_smoothed = np.maximum(X_smoothed, min_positive)  # Force all features to be positive
+Y_smoothed = np.maximum(Y_smoothed, min_positive)  # Force all targets to be positive
+
+print("Smoothing completed - ALL features treated equally with same method")
+print(f"All values clamped to minimum positive value: {min_positive}")
 
 print("Original input ranges:")
 for i in range(num_features):
     print(f"{feature_cols[i]}: {X[:, i].min():.2f} to {X[:, i].max():.2f}")
-print("\nScaled input ranges:")
+print("\nSmoothed input ranges:")
 for i in range(num_features):
-    print(f"{feature_cols[i]}: {X_scaled[:, i].min():.2f} to {X_scaled[:, i].max():.2f}")
+    print(f"{feature_cols[i]}: {X_smoothed[:, i].min():.2f} to {X_smoothed[:, i].max():.2f}")
+
+# Show specific examples of smoothing effect
+print("\n=== SMOOTHING EFFECT EXAMPLES ===")
+print("First 5 samples - Before vs After smoothing:")
+print(f"{'Feature':<8} {'Original':<15} {'Smoothed':<15} {'Change':<10}")
+print("-" * 55)
+
+for i in range(min(5, len(X))):
+    for j in range(num_features):
+        orig_val = X[i, j]
+        smooth_val = X_smoothed[i, j]
+        change = smooth_val - orig_val
+        print(f"{feature_cols[j]:<8} {orig_val:<15.3f} {smooth_val:<15.3f} {change:<+10.3f}")
+    print("-" * 55)
 
 print("\nOriginal target ranges:")
 for i in range(num_outputs):
     print(f"{target_cols[i]}: {Y[:, i].min():.2f} to {Y[:, i].max():.2f}")
-print("\nScaled target ranges:")
+print("\nSmoothed target ranges:")
 for i in range(num_outputs):
-    print(f"{target_cols[i]}: {Y_scaled[:, i].min():.2f} to {Y_scaled[:, i].max():.2f}")
+    print(f"{target_cols[i]}: {Y_smoothed[:, i].min():.2f} to {Y_smoothed[:, i].max():.2f}")
+
+# Show target smoothing examples
+print("\n=== TARGET SMOOTHING EXAMPLES ===")
+print("First 5 samples - Before vs After smoothing:")
+print(f"{'Target':<10} {'Original':<15} {'Smoothed':<15} {'Change':<10}")
+print("-" * 55)
+
+for i in range(min(5, len(Y))):
+    for j in range(num_outputs):
+        orig_val = Y[i, j]
+        smooth_val = Y_smoothed[i, j]
+        change = smooth_val - orig_val
+        print(f"{target_cols[j]:<10} {orig_val:<15.3f} {smooth_val:<15.3f} {change:<+10.3f}")
+    print("-" * 55)
+
+# Use smoothed data for training
+X_train = X_smoothed
+Y_train = Y_smoothed
 
 # 3. Use simple architecture that was working well
 input_size = num_features
-ln_blocks = (4, 4, 4, 4,)          # 1 shared layer with 4 PTA blocks
-lin_blocks = (1, 1, 1, 1,)         # Must match ln_blocks
+ln_blocks = (4,)                    # 1 shared layer with 4 PTA blocks
+lin_blocks = (1,)                   # Must match ln_blocks
 output_ln_blocks = 2        # 2 PTA blocks per output for simpler equations
 
 # Regularization strategy:
@@ -172,7 +256,7 @@ model.compile(optimizer=opt, loss=custom_loss, metrics=['mean_squared_error', 'm
 # print("\nModel Summary:")
 # model.summary()
 
-# 5. Train model with scaled values
+# 5. Train model with smoothed values
 # Add EarlyStopping callback
 early_stopping = EarlyStopping(
     monitor='val_loss',
@@ -182,8 +266,8 @@ early_stopping = EarlyStopping(
 )
 
 history = model.fit(
-    [X_scaled[:, i].reshape(-1, 1) for i in range(input_size)],
-    [Y_scaled[:, i].reshape(-1, 1) for i in range(num_outputs)],
+    [X_train[:, i].reshape(-1, 1) for i in range(input_size)],
+    [Y_train[:, i].reshape(-1, 1) for i in range(num_outputs)],
     epochs=10000,  # You can still set a high max, but training will stop early if no improvement
     batch_size=32,
     validation_split=0.2,
@@ -201,30 +285,31 @@ plt.title('Training and Validation Loss Curves')
 plt.legend()
 plt.grid(True)
 plt.tight_layout()
+plt.savefig(os.path.join(model_dir, 'training_loss_curves.png'), dpi=300, bbox_inches='tight')
 plt.show()
 
-# 6. Evaluate with scaled values
+# 6. Evaluate with smoothed values
 results = model.evaluate(
-    [X_scaled[:, i].reshape(-1, 1) for i in range(input_size)],
-    [Y_scaled[:, i].reshape(-1, 1) for i in range(num_outputs)],
+    [X_train[:, i].reshape(-1, 1) for i in range(input_size)],
+    [Y_train[:, i].reshape(-1, 1) for i in range(num_outputs)],
     verbose=0
 )
 
-# 7. Calculate predictions and convert back to original scale for metrics
-predictions_scaled = model.predict([X_scaled[:, i].reshape(-1, 1) for i in range(input_size)])
+# 7. Calculate predictions on smoothed data
+predictions_smoothed = model.predict([X_train[:, i].reshape(-1, 1) for i in range(input_size)])
 # Save predictions as a single (n_samples, 2) array for both outputs
-np.save('nn_preds_scaled.npy', np.column_stack(predictions_scaled))
-print("Saved neural network predictions to nn_preds_scaled.npy")
-predictions_original = scaler_Y.inverse_transform(np.column_stack(predictions_scaled))
+np.save(os.path.join(model_dir, 'nn_preds_smoothed.npy'), np.column_stack(predictions_smoothed))
+print(f"Saved neural network predictions to {model_dir}/nn_preds_smoothed.npy")
+predictions_original = np.column_stack(predictions_smoothed)  # No need to inverse transform since we kept original scale
 
-# Calculate metrics on both scaled and original scale
+# Calculate metrics on both smoothed and original scale
 from sklearn.metrics import mean_squared_error, mean_absolute_percentage_error
 
-print("\n=== EVALUATION ON SCALED DATA ===")
+print("\n=== EVALUATION ON SMOOTHED DATA ===")
 for i in range(num_outputs):
-    mse_scaled = mean_squared_error(Y_scaled[:, i], predictions_scaled[i].flatten())
-    mape_scaled = mean_absolute_percentage_error(Y_scaled[:, i], predictions_scaled[i].flatten())
-    print(f"Target {i+1} (scaled): MSE = {mse_scaled:.6f}, MAPE = {mape_scaled:.2f}%")
+    mse_smoothed = mean_squared_error(Y_train[:, i], predictions_smoothed[i].flatten())
+    mape_smoothed = mean_absolute_percentage_error(Y_train[:, i], predictions_smoothed[i].flatten())
+    print(f"Target {i+1} (smoothed): MSE = {mse_smoothed:.6f}, MAPE = {mape_smoothed:.2f}%")
 
 print("\n=== EVALUATION ON ORIGINAL SCALE ===")
 for i in range(num_outputs):
@@ -256,15 +341,95 @@ for layer in model.layers:
             layer.set_weights(weights)
             print(f"Post-processed {layer.name}: zeroed out {np.sum(kernel_mask)} small coefficients")
 
-# 9. Extract and print symbolic equations
+# 9. SHOW DATA TRANSFORMATION COMPARISON
+print("\n=== DATA TRANSFORMATION COMPARISON ===")
+print("Showing BEFORE vs AFTER smoothing for first 10 samples")
+print("This demonstrates exactly how your data was transformed for training")
+
+# Show feature comparison
+print(f"\n📊 FEATURE COMPARISON (First 10 samples):")
+print(f"{'Sample':<6} {'Feature':<8} {'Original':<12} {'Smoothed':<12} {'Change':<10} {'%Change':<10}")
+print("-" * 70)
+
+for sample_idx in range(min(10, len(X))):
+    for feat_idx in range(num_features):
+        orig_val = X[sample_idx, feat_idx]
+        smooth_val = X_smoothed[sample_idx, feat_idx]
+        change = smooth_val - orig_val
+        pct_change = (change / orig_val) * 100 if orig_val != 0 else 0
+        
+        print(f"{sample_idx:<6} {feature_cols[feat_idx]:<8} {orig_val:<12.6f} {smooth_val:<12.6f} {change:<+10.6f} {pct_change:<10.2f}%")
+    print("-" * 70)
+
+# Show target comparison
+print(f"\n🎯 TARGET COMPARISON (First 10 samples):")
+print(f"{'Sample':<6} {'Target':<10} {'Original':<12} {'Smoothed':<12} {'Change':<10} {'%Change':<10}")
+print("-" * 70)
+
+for sample_idx in range(min(10, len(Y))):
+    for target_idx in range(num_outputs):
+        orig_val = Y[sample_idx, target_idx]
+        smooth_val = Y_smoothed[sample_idx, target_idx]
+        change = smooth_val - orig_val
+        pct_change = (change / orig_val) * 100 if orig_val != 0 else 0
+        
+        print(f"{sample_idx:<6} {target_cols[target_idx]:<10} {orig_val:<12.6f} {smooth_val:<12.6f} {change:<+10.6f} {pct_change:<10.2f}%")
+    print("-" * 70)
+
+# Show summary statistics
+print(f"\n📈 SMOOTHING SUMMARY STATISTICS:")
+print(f"{'Metric':<15} {'Original':<15} {'Smoothed':<15} {'Change':<15}")
+print("-" * 60)
+
+# Feature statistics
+for feat_idx in range(num_features):
+    feat_name = feature_cols[feat_idx]
+    orig_mean = np.mean(X[:, feat_idx])
+    orig_std = np.std(X[:, feat_idx])
+    smooth_mean = np.mean(X_smoothed[:, feat_idx])
+    smooth_std = np.std(X_smoothed[:, feat_idx])
+    
+    print(f"{feat_name}_mean: {orig_mean:<15.6f} {smooth_mean:<15.6f} {smooth_mean-orig_mean:<+15.6f}")
+    print(f"{feat_name}_std:  {orig_std:<15.6f} {smooth_std:<15.6f} {smooth_std-orig_std:<+15.6f}")
+
+# Target statistics
+for target_idx in range(num_outputs):
+    target_name = target_cols[target_idx]
+    orig_mean = np.mean(Y[:, target_idx])
+    orig_std = np.std(Y[:, target_idx])
+    smooth_mean = np.mean(Y_smoothed[:, target_idx])
+    smooth_std = np.std(Y_smoothed[:, target_idx])
+    
+    print(f"{target_name}_mean: {orig_mean:<15.6f} {smooth_mean:<15.6f} {smooth_mean-orig_mean:<+15.6f}")
+    print(f"{target_name}_std:  {orig_std:<15.6f} {smooth_std:<15.6f} {smooth_std-orig_std:<+15.6f}")
+
+print(f"\n💡 KEY INSIGHT: Smoothing preserves original scale while reducing noise!")
+print(f"   • Your equations work directly on the ORIGINAL data scale")
+print(f"   • No need to remember scaling transformations")
+print(f"   • Natural data relationships are preserved")
+
+# 10. Extract and print symbolic equations
 print("\n=== SYMBOLIC EQUATIONS ===")
+print("Extracting equations using BOTH methods for comparison...")
+
+# Method 1: Standard power-based extraction (current method)
+print("\n" + "="*60)
+print("METHOD 1: STANDARD POWER-BASED EXTRACTION")
+print("="*60)
 get_multioutput_sympy_expr(model, input_size, output_ln_blocks, round_digits=3)
+
+# Method 2: Logarithmic extraction (professor's suggestion)
+print("\n" + "="*60)
+print("METHOD 2: LOGARITHMIC EXTRACTION")
+print("="*60)
+from ginnlp.utils import get_multioutput_log_symbolic_expr
+get_multioutput_log_symbolic_expr(model, input_size, output_ln_blocks, round_digits=3)
 
 print(f"\nTraining completed successfully!")
 
-# Calculate overall metrics for scaled data
-overall_mse_scaled = np.mean([mean_squared_error(Y_scaled[:, i], predictions_scaled[i].flatten()) for i in range(num_outputs)])
-overall_mape_scaled = np.mean([mean_absolute_percentage_error(Y_scaled[:, i], predictions_scaled[i].flatten()) for i in range(num_outputs)])
+# Calculate overall metrics for smoothed data
+overall_mse_smoothed = np.mean([mean_squared_error(Y_train[:, i], predictions_smoothed[i].flatten()) for i in range(num_outputs)])
+overall_mape_smoothed = np.mean([mean_absolute_percentage_error(Y_train[:, i], predictions_smoothed[i].flatten()) for i in range(num_outputs)])
 
 # Calculate overall metrics for original scale
 overall_mse = np.mean([mean_squared_error(Y[:, i], predictions_original[:, i]) for i in range(num_outputs)])
@@ -276,11 +441,11 @@ print(f"\n{'='*60}")
 print(f"FINAL PERFORMANCE METRICS")
 print(f"{'='*60}")
 
-# Calculate individual metrics for each target (using scaled data)
-mse_target1 = mean_squared_error(Y_scaled[:, 0], predictions_scaled[0].flatten())
-mse_target2 = mean_squared_error(Y_scaled[:, 1], predictions_scaled[1].flatten())
-mape_target1 = mean_absolute_percentage_error(Y_scaled[:, 0], predictions_scaled[0].flatten())
-mape_target2 = mean_absolute_percentage_error(Y_scaled[:, 1], predictions_scaled[1].flatten())
+# Calculate individual metrics for each target (using smoothed data)
+mse_target1 = mean_squared_error(Y_train[:, 0], predictions_smoothed[0].flatten())
+mse_target2 = mean_squared_error(Y_train[:, 1], predictions_smoothed[1].flatten())
+mape_target1 = mean_absolute_percentage_error(Y_train[:, 0], predictions_smoothed[0].flatten())
+mape_target2 = mean_absolute_percentage_error(Y_train[:, 1], predictions_smoothed[1].flatten())
 
 # Calculate averages
 avg_mse = (mse_target1 + mse_target2) / 2
@@ -288,14 +453,14 @@ avg_mape = (mape_target1 + mape_target2) / 2
 
 # Print formatted table
 print(f"\n{'='*80}")
-print("Multi-GINN MODEL RESULTS")
+print("Multi-GINN MODEL RESULTS (DATA SMOOTHING)")
 print(f"{'='*80}")
 
 print(f"{'Model':<25} | {'MSE':<15} | {'MAPE':<15}")
 print(f"{'':<25} | {'Y1':<6} {'Y2':<6} {'Avg':<6} | {'Y1':<6} {'Y2':<6} {'Avg':<6}")
 print("-" * 80)
 
-print(f"{'Multi-GINN':<25} | {mse_target1:<6.4f} {mse_target2:<6.4f} {avg_mse:<6.4f} | "
+print(f"{'Multi-GINN (Smoothed)':<25} | {mse_target1:<6.4f} {mse_target2:<6.4f} {avg_mse:<6.4f} | "
       f"{mape_target1:<6.2f} {mape_target2:<6.2f} {avg_mape:<6.2f}")
 
 print("="*80)
@@ -309,7 +474,7 @@ print(f"   • File: {csv_path}")
 print(f"   • Features: {num_features} ({', '.join(feature_cols[:3])}{'...' if len(feature_cols) > 3 else ''})")
 print(f"   • Targets: {num_outputs} ({', '.join(target_cols)})")
 print(f"   • Data shape: {X.shape[0]} samples × {X.shape[1]} features")
-print(f"   • Scaling: MinMaxScaler({scaler_X.feature_range[0]}, {scaler_X.feature_range[1]})")
+print(f"   • Data Processing: {smoothing_method.title()} Smoothing (preserves original scale)")
 
 print(f"\n🏗️  ARCHITECTURE:")
 print(f"   • Shared layers: {len(ln_blocks)} layer(s) with {ln_blocks[0]} PTA blocks")
@@ -324,9 +489,9 @@ print(f"   • Decay steps: {decay_steps}")
 print(f"   • Task weights: {task_weights} (sum = {sum(task_weights):.2f})")
 print(f"   • Shared layer L1/L2: 1e-3/1e-3")
 print(f"   • Output layer L1/L2: 0.2/0.1")
-print(f"   • Early stopping: patience = 50")
+print(f"   • Early stopping: patience = 100")
 
-print(f"\n📈 FINAL METRICS (SCALED DATA):")
+print(f"\n📈 FINAL METRICS (SMOOTHED DATA):")
 print(f"   • Target 1 ({target_cols[0]}): MSE = {mse_target1:.4f}, MAPE = {mape_target1:.2f}%")
 if num_outputs > 1:
     print(f"   • Target 2 ({target_cols[1]}): MSE = {mse_target2:.4f}, MAPE = {mape_target2:.2f}%")
@@ -344,11 +509,11 @@ else:
 print(f"   • Overall MAPE: {avg_mape:.2f}% ({performance})")
 print(f"   • Model complexity: {ln_blocks[0]} shared + {num_outputs * output_ln_blocks} output PTA blocks")
 print("="*80)
-print(f"Complexity reduction: Strong L1/L2 regularization + post-processing threshold {threshold}")
+print(f"Data smoothing: {smoothing_method.title()} (sigma=3.0 features, 1.5 targets) + post-processing threshold {threshold}")
 
 # Save results to CSV
 results_data = {
-    'Model': ['Multi-GINN'],
+    'Model': ['Multi-GINN (Smoothed)'],
     'Y1_MSE': [mse_target1],
     'Y2_MSE': [mse_target2],
     'Avg_MSE': [avg_mse],
@@ -358,10 +523,11 @@ results_data = {
 }
 
 results_df = pd.DataFrame(results_data)
-results_df.to_csv('multiginn_results.csv', index=False)
-print(f"\nResults saved to 'multiginn_results.csv'")
+results_csv_path = os.path.join(model_dir, 'multiginn_metrics_smoothed.csv')
+results_df.to_csv(results_csv_path, index=False)
+print(f"\nResults saved to '{results_csv_path}'")
 
-print(f"\n=== DETAILED METRICS (SCALED DATA) ===")
+print(f"\n=== DETAILED METRICS (SMOOTHED DATA) ===")
 print(f"Target 1: MSE = {mse_target1:.4f}, MAPE = {mape_target1:.2f}%")
 print(f"Target 2: MSE = {mse_target2:.4f}, MAPE = {mape_target2:.2f}%")
 print(f"Average: MSE = {avg_mse:.4f}, MAPE = {avg_mape:.2f}%")
@@ -380,4 +546,10 @@ print(f"Average MAPE: {avg_mape_orig:.2f}%")
 
 print(f"\n=== PRIMARY METRIC: MAPE (Scale-Invariant) ===")
 print(f"MAPE is the better metric for diverse data scales")
-print(f"Overall MAPE (scaled): {avg_mape:.2f}% (excellent if < 5%)")
+print(f"Overall MAPE (smoothed): {avg_mape:.2f}% (excellent if < 5%)")
+print(f"Overall MAPE (original): {avg_mape_orig:.2f}% (excellent if < 5%)")
+print(f"\n💡 ADVANTAGE OF SMOOTHING:")
+print(f"   • Equations work directly on your original data scale")
+print(f"   • No need to remember scaling transformations")
+print(f"   • Preserves natural data relationships")
+print(f"   • Handles zeros without arbitrary transformations")

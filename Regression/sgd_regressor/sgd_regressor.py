@@ -10,7 +10,19 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from typing import Dict, List, Tuple
 import warnings
+import sys
+import os
 warnings.filterwarnings('ignore')
+
+# Add parent directory to path to import shared utilities
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+from shared_data_utils import (
+    load_and_preprocess_data, 
+    get_train_test_split, 
+    create_standard_scaler,
+    get_data_info,
+    validate_data_consistency
+)
 
 class MultiTaskSGDRegressor:
     """
@@ -58,7 +70,7 @@ class MultiTaskSGDRegressor:
             # Create pipeline with scaler and regressor
             pipeline = Pipeline([
                 # ('scaler', StandardScaler()),
-                ('scaler', MinMaxScaler(feature_range=(0.1, 10.0))),
+                ('scaler', create_standard_scaler()),
                 ('regressor', SGDRegressor(
                     random_state=self.random_state,
                     max_iter=self.max_iter,
@@ -128,33 +140,7 @@ class MultiTaskSGDRegressor:
             
         return intercepts
 
-def load_and_preprocess_data(file_path: str) -> Tuple[np.ndarray, np.ndarray, List[str], List[str]]:
-    """
-    Load and preprocess the ENB2012 dataset.
-    
-    Args:
-        file_path: Path to the CSV file
-        
-    Returns:
-        X: Features array
-        y: Targets array
-        feature_names: List of feature names
-        target_names: List of target names
-    """
-    # Load data
-    df = pd.read_csv(file_path)
-    
-    # Separate features and targets
-    feature_cols = [col for col in df.columns if col.startswith('X')]
-    target_cols = [col for col in df.columns if col.startswith('target')]
-    
-    X = df[feature_cols].values
-    y = df[target_cols].values
-    
-    feature_names = feature_cols
-    target_names = target_cols
-    
-    return X, y, feature_names, target_names
+# Using shared data utilities - load_and_preprocess_data function removed
 
 def evaluate_model(model: MultiTaskSGDRegressor, X_test: np.ndarray, y_test: np.ndarray, 
                   target_names: List[str]) -> Dict[str, Dict[str, float]]:
@@ -294,8 +280,8 @@ def compare_with_linear_regression(X: np.ndarray, y: np.ndarray, target_names: L
         X, y, test_size=0.2, random_state=42
     )
     
-    # Scale features
-    scaler = MinMaxScaler(feature_range=(0.1, 10.0))
+    # Scale features using shared utilities
+    scaler = create_standard_scaler()
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
     
@@ -348,20 +334,17 @@ def main():
     """
     print("Loading and preprocessing ENB2012 dataset...")
     
-    # Load data
-    X, y, feature_names, target_names = load_and_preprocess_data('data/ENB2012_data.csv')
+    # Load data using shared utilities
+    X, y, feature_names, target_names = load_and_preprocess_data()
     
-    print(f"Dataset shape: {X.shape}")
-    print(f"Features: {feature_names}")
-    print(f"Targets: {target_names}")
+    # Validate data consistency
+    validate_data_consistency(X, y, feature_names, target_names)
     
-    # Split data
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42
-    )
+    # Print standardized data information
+    get_data_info(X, y, feature_names, target_names)
     
-    print(f"\nTraining set size: {X_train.shape[0]}")
-    print(f"Test set size: {X_test.shape[0]}")
+    # Split data using shared utilities
+    X_train, X_test, y_train, y_test = get_train_test_split(X, y)
     
     # Create and fit model
     print("\nTraining multi-task SGD regressor model...")
@@ -394,7 +377,7 @@ def main():
         # Create pipeline for this target
         pipeline = Pipeline([
             # ('scaler', StandardScaler()),
-            ('scaler', MinMaxScaler(feature_range=(0.1, 10.0))),
+            ('scaler', create_standard_scaler()),
             ('regressor', SGDRegressor(
                 random_state=42,
                 max_iter=1000,
