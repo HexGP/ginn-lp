@@ -90,14 +90,10 @@ VAL_SPLIT = 0.2
 PATIENCE = 100
 TASK_WEIGHTS = [0.5, 0.5]             # Balanced weights for both outputs
 
-# Faithfulness system parameters (ChatGPT Engineering Plan)
-FAITHFULNESS_ALPHA = 0.1             # Faithfulness loss weight (0.05-0.2 range)
-FAITHFULNESS_EPOCHS = 50             # How many epochs to apply faithfulness loss
-CALIBRATION_ANCHOR_SIZE = 256        # Size of anchor set for consistent evaluation
-EXCELLENT_FAITHFULNESS = 0.99        # R² ≥ 0.99 for publication quality
-GOOD_FAITHFULNESS = 0.90             # R² ≥ 0.90 for good generalization
-MAX_MAPE = 15.0                      # Maximum MAPE allowed (10-15% range)
-RANGE_TOLERANCE = 0.1                # Allow 10% range expansion for predictions
+# Faithfulness system parameters
+FAITHFULNESS_THRESHOLD = 0.98        # R² threshold to trigger nudging
+NUDGE_ALPHA = 0.05                   # How much to nudge head weights toward refit
+NUDGE_EPOCHS = 10                    # How many epochs to apply faithfulness penalty
 # ==========================================
 
 
@@ -449,103 +445,6 @@ def refit_coeffs_multi(exprs, n_features, X, Y, symbols=None, ridge=RIDGE_LAMBDA
         out.append(refit_coeffs_single(e, symbols, X, Y[:, j], ridge=ridge))
     return out
 
-def affine_calibration(y_eq, y_target, method='nn_output'):
-    """
-    Apply affine calibration: ŷ_cal = a·ŷ_eq + b
-    
-    Args:
-        y_eq: Equation predictions
-        y_target: Target values (either NN outputs or ground truth)
-        method: 'nn_output' for faithfulness, 'truth' for generalization
-    
-    Returns:
-        a, b: Calibration coefficients
-        y_cal: Calibrated predictions
-    """
-    # Ensure inputs are 1D arrays
-    y_eq = y_eq.reshape(-1)
-    y_target = y_target.reshape(-1)
-    
-    # Build design matrix: [y_eq, 1]
-    A = np.column_stack([y_eq, np.ones_like(y_eq)])
-    b = y_target
-    
-    # Solve least squares: [a, b] = (A^T A)^(-1) A^T b
-    try:
-        coeffs = np.linalg.lstsq(A, b, rcond=None)[0]
-        a, b = coeffs[0], coeffs[1]
-    except np.linalg.LinAlgError:
-        # Fallback: use simple scaling if matrix is singular
-        a = np.std(y_target) / (np.std(y_eq) + 1e-8)
-        b = np.mean(y_target) - a * np.mean(y_eq)
-    
-    # Apply calibration
-    y_cal = a * y_eq + b
-    
-    return a, b, y_cal
-
-def calculate_mape(y_true, y_pred):
-    """Calculate Mean Absolute Percentage Error"""
-    # Avoid division by zero
-    mask = np.abs(y_true) > 1e-10
-    if not np.any(mask):
-        return np.inf
-    
-    y_true_masked = y_true[mask]
-    y_pred_masked = y_pred[mask]
-    
-    # Calculate MAPE
-    mape = np.mean(np.abs((y_true_masked - y_pred_masked) / y_true_masked)) * 100
-    return mape
-
-def check_acceptance_gates(y_eq_cal, y_truth, y_nn, target_name):
-    """
-    Check if equations meet acceptance criteria for publication quality.
-    
-    Returns:
-        dict: Acceptance status and metrics
-    """
-    # Calculate all required metrics
-    r2_faithfulness = r2_score(y_nn, y_eq_cal)  # Model ↔ Equation
-    r2_generalization = r2_score(y_truth, y_eq_cal)  # Truth ↔ Equation
-    
-    # Calculate MAPE
-    mape = calculate_mape(y_truth, y_eq_cal)
-    
-    # Check range constraints
-    y_min, y_max = np.min(y_truth), np.max(y_truth)
-    y_range = y_max - y_min
-    tolerance = y_range * RANGE_TOLERANCE
-    
-    eq_min, eq_max = np.min(y_eq_cal), np.max(y_eq_cal)
-    range_ok = (eq_min >= y_min - tolerance) and (eq_max <= y_max + tolerance)
-    
-    # Acceptance criteria
-    excellent_faithfulness = r2_faithfulness >= EXCELLENT_FAITHFULNESS
-    good_generalization = r2_generalization >= GOOD_FAITHFULNESS
-    acceptable_mape = mape <= MAX_MAPE
-    acceptable_range = range_ok
-    
-    # Overall acceptance
-    all_criteria_met = (excellent_faithfulness and good_generalization and 
-                       acceptable_mape and acceptable_range)
-    
-    return {
-        'target': target_name,
-        'r2_faithfulness': r2_faithfulness,
-        'r2_generalization': r2_generalization,
-        'mape': mape,
-        'range_ok': range_ok,
-        'excellent_faithfulness': excellent_faithfulness,
-        'good_generalization': good_generalization,
-        'acceptable_mape': acceptable_mape,
-        'acceptable_range': acceptable_range,
-        'all_criteria_met': all_criteria_met,
-        'y_range': [y_min, y_max],
-        'eq_range': [eq_min, eq_max],
-        'tolerance': tolerance
-    }
-
 # ---------- Adaptive Faithfulness System ----------
 class AdaptiveFaithfulnessSystem:
     """
@@ -665,7 +564,7 @@ class AdaptiveFaithfulnessSystem:
 
 # ---------- Head Weight Nudging for Faithfulness ----------
 def nudge_head_weights_toward_refit(model, head_idx, X_anchor, Y_anchor, exprs_refit, 
-                                   symbols, nudge_alpha=0.05):
+                                   symbols, nudge_alpha=NUDGE_ALPHA):
     """
     Nudge the final output layer weights toward the refitted equation solution.
     This keeps equations faithful to the model without symbolic backprop.
@@ -758,12 +657,10 @@ class EquationSyncCallback(Callback):
         self.model = model  # Keep model reference for monitoring
         self.anchor_set = anchor_set  # Anchor set for consistent evaluation
         
-        # Faithfulness system state (ChatGPT Engineering Plan)
-        self.faithfulness_phase = 'normal'  # 'normal', 'faithfulness', 'fine_tune'
+        # Faithfulness tracking
+        self.faithfulness_penalty_active = False
         self.faithfulness_epochs_remaining = 0
-        self.calibrated_equations = None
-        self.calibration_coeffs = None
-        self.acceptance_results = None
+        self.last_faithfulness_check = {}
         
         # Initialize adaptive faithfulness system
         self.adaptive_system = AdaptiveFaithfulnessSystem(num_outputs=2)
@@ -874,14 +771,6 @@ class EquationSyncCallback(Callback):
                     print(f"[EqSync @ epoch {epoch}] ⚠️ Loss monitoring failed: {e}")
         except Exception as e:
             print(f"[EqSync @ epoch {epoch}] Equation sync failed: {e}")
-    
-    def get_faithfulness_phase(self):
-        """Get current faithfulness phase for loss function switching"""
-        return self.faithfulness_phase
-    
-    def get_calibrated_equations(self):
-        """Get the most recent calibrated equations for faithfulness loss"""
-        return self.calibrated_equations
 
 
 # ---------- Loss (weighted multitask MSE with scale normalization) ----------
@@ -901,102 +790,13 @@ def faithfulness_aware_loss(task_weights, faithfulness_weight=0.0):
             return tf.keras.losses.mse(y_true, y_pred)
     return loss
 
-def faithfulness_loss_with_calibration(y_true, y_pred, y_eq_cal, alpha=FAITHFULNESS_ALPHA):
-    """
-    Faithfulness loss that encourages model predictions to match calibrated equations.
-    
-    Args:
-        y_true: Ground truth values
-        y_pred: Model predictions
-        y_eq_cal: Calibrated equation predictions
-        alpha: Weight for faithfulness term (0.05-0.2 range)
-    
-    Returns:
-        Combined loss: main_loss + alpha * faithfulness_loss
-    """
-    # Main task loss (normalized MSE)
-    main_loss = faithfulness_aware_loss(TASK_WEIGHTS, faithfulness_weight=0.0)(y_true, y_pred)
-    
-    # Faithfulness loss: encourage model to match equations
-    faithfulness_loss = tf.constant(0.0, dtype=tf.float32)
-    
-    if isinstance(y_pred, (list, tuple)) and isinstance(y_eq_cal, (list, tuple)):
-        for i in range(len(y_pred)):
-            # MSE between model predictions and calibrated equations
-            mse_faith = tf.keras.losses.mse(y_pred[i], y_eq_cal[i])
-            faithfulness_loss += mse_faith
-    else:
-        # Single output case
-        faithfulness_loss = tf.keras.losses.mse(y_pred, y_eq_cal)
-    
-    # Combine losses
-    total_loss = main_loss + alpha * faithfulness_loss
-    
-    return total_loss
-
-class FaithfulnessTrainingWrapper:
-    """
-    Wrapper that switches between normal and faithfulness loss based on training phase.
-    """
-    def __init__(self, base_model, eqsync_callback):
-        self.base_model = base_model
-        self.eqsync_callback = eqsync_callback
-        self.current_phase = 'normal'
-    
-    def train_step(self, data):
-        # Get current phase from callback
-        phase = self.eqsync_callback.get_faithfulness_phase()
-        
-        if phase == 'faithfulness' and self.eqsync_callback.get_calibrated_equations() is not None:
-            # Use faithfulness loss
-            return self._faithfulness_training_step(data)
-        else:
-            # Use normal training
-            return self.base_model.train_step(data)
-    
-    def _faithfulness_training_step(self, data):
-        """Training step with faithfulness loss"""
-        x, y = data
-        
-        with tf.GradientTape() as tape:
-            # Forward pass
-            y_pred = self.base_model(x, training=True)
-            
-            # Get calibrated equations for faithfulness loss
-            y_eq_cal = self.eqsync_callback.get_calibrated_equations()
-            
-            # Calculate faithfulness loss
-            loss = faithfulness_loss_with_calibration(y, y_pred, y_eq_cal, FAITHFULNESS_ALPHA)
-        
-        # Compute gradients and apply
-        gradients = tape.gradient(loss, self.base_model.trainable_variables)
-        self.base_model.optimizer.apply_gradients(zip(gradients, self.base_model.trainable_variables))
-        
-        # Return metrics
-        return {'loss': loss}
-
 
 # ================== MAIN ==================
-# CHATGPT ENGINEERING PLAN - FAITHFULNESS SYSTEM
-# This script implements a comprehensive faithfulness system that ensures extracted
-# equations actually represent what the model learned. For publication quality:
-#
-# PHASES:
-# 1) Normal Training: Standard multitask learning with PTA blocks
-# 2) Faithfulness Phase: Apply faithfulness loss to align model with equations
-# 3) Fine-tune: Final optimization once faithfulness criteria are met
-#
-# ACCEPTANCE CRITERIA (per output):
-# - R²(model↔equation) ≥ 0.99 (excellent faithfulness)
-# - R²(truth↔equation) ≥ 0.90 (good generalization)  
-# - MAPE ≤ 15% (acceptable scale)
-# - Range within ±10% of actual data
-#
-# KEY FEATURES:
-# - Affine calibration: ŷ_cal = a·ŷ_eq + b to fix scale/range issues
-# - Anchor set evaluation: Consistent subset for stable comparisons
-# - Dynamic loss switching: Normal ↔ Faithfulness based on phase
-# - Automatic phase management: Training stops when criteria met
+# FAITHFULNESS SYSTEM: This script now measures how well extracted equations
+# match the model's actual predictions. For publication-quality results, we need:
+# - R² ≥ 0.9 between model predictions and extracted equations
+# - Equations that predict in the same scale/range as the model
+# - Consistent performance across different data splits
 def main():
     # 1) Load data
     df = pd.read_csv(DATA_CSV)
@@ -1035,7 +835,7 @@ def main():
         Y_test_s  = savgol_positive(Y_test)
         
         # 3.5) Create anchor set for faithfulness system
-        anchor_set = AnchorSet(X_train_s, Y_train_s, anchor_size=CALIBRATION_ANCHOR_SIZE)
+        anchor_set = AnchorSet(X_train_s, Y_train_s, anchor_size=512)
 
         # 4) Build GINN model (use it directly; no wrapper)
         opt = eql_opt(decay_steps=DECAY_STEPS, init_lr=INIT_LR)
@@ -1292,36 +1092,6 @@ def main():
     with open(out_path, "w") as f:
         json.dump(all_results, f, indent=2)
     print(f"\n💾 Saved detailed results: {out_path}")
-    
-    # Final faithfulness summary
-    print("\n" + "="*70)
-    print("🎯 FINAL FAITHFULNESS ASSESSMENT")
-    print("="*70)
-    
-    if excellent_faithfulness > 0:
-        print(f"🎉 PUBLICATION READY: {excellent_faithfulness}/{total_targets} targets achieved EXCELLENT faithfulness!")
-        print("   Your equations now faithfully represent the model's learned behavior.")
-        print("   This meets the publication threshold of R² ≥ 0.99 faithfulness.")
-    elif good_faithfulness > 0:
-        print(f"🟡 CLOSE TO PUBLICATION: {good_faithfulness}/{total_targets} targets achieved GOOD faithfulness.")
-        print("   Equations are improving but need more work to reach publication quality.")
-        print("   Focus on the remaining targets to achieve R² ≥ 0.99 faithfulness.")
-    else:
-        print(f"🔴 NEEDS MORE WORK: No targets achieved good faithfulness yet.")
-        print("   The faithfulness system will continue working in future runs.")
-        print("   Consider adjusting PTA blocks or training parameters.")
-    
-    print("\n📚 NEXT STEPS:")
-    if excellent_faithfulness > 0:
-        print("   1. ✅ Equations are publication-ready")
-        print("   2. 🔬 Run K-fold validation for final metrics")
-        print("   3. 📝 Write your research paper!")
-    else:
-        print("   1. 🔄 Run training again - faithfulness system will continue working")
-        print("   2. ⚙️  Consider adjusting faithfulness parameters if needed")
-        print("   3. 📊 Monitor progress toward R² ≥ 0.99 threshold")
-    
-    print("="*70)
 
 
 if __name__ == "__main__":
