@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import MinMaxScaler
+from scipy.signal import savgol_filter
 from typing import Tuple, List
 import warnings
 warnings.filterwarnings('ignore')
@@ -9,12 +9,12 @@ warnings.filterwarnings('ignore')
 # Global constants for consistent data handling
 RANDOM_STATE = 42
 TEST_SIZE = 0.2
-SCALER_FEATURE_RANGE = (0.1, 10.0)
-cDATA_FILE_PATH = '../data/syn_reg.csv'
+MIN_POSITIVE = 1e-2  # Minimum positive value for positivity clamp
+DATA_FILE_PATH = 'data/pos_reg.csv'
 
 def load_and_preprocess_data(file_path: str = DATA_FILE_PATH) -> Tuple[np.ndarray, np.ndarray, List[str], List[str]]:
     """
-    Load and preprocess the ENB2012 dataset with standardized approach.
+    Load and preprocess the dataset with smoothing approach (matching GINN preprocessing).
     
     Args:
         file_path: Path to the CSV file (defaults to standard path)
@@ -40,6 +40,25 @@ def load_and_preprocess_data(file_path: str = DATA_FILE_PATH) -> Tuple[np.ndarra
     
     return X, y, feature_names, target_names
 
+def savgol_positive(X, window_length=15, polyorder=3, min_positive=MIN_POSITIVE):
+    """
+    Savitzky–Golay smoothing with positivity clamp (matching GINN approach).
+    Works for both features (X) and targets (Y).
+    """
+    arr = np.asarray(X, dtype=float).copy()
+    n, d = arr.shape
+    wl = max(3, min(window_length, (n // 2) * 2 + 1))  # must be odd, <= n and >=3
+    
+    for j in range(d):
+        if n >= wl:
+            arr[:, j] = savgol_filter(arr[:, j], wl, polyorder)
+    
+    # clamp: avoid true zeros and enforce positivity
+    arr = np.where(np.isfinite(arr), arr, 0.0)
+    arr = np.maximum(arr, min_positive)
+    
+    return arr
+
 def get_train_test_split(X: np.ndarray, y: np.ndarray, 
                         test_size: float = TEST_SIZE, 
                         random_state: int = RANDOM_STATE) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -57,17 +76,36 @@ def get_train_test_split(X: np.ndarray, y: np.ndarray,
     """
     return train_test_split(X, y, test_size=test_size, random_state=random_state)
 
-def create_standard_scaler(feature_range: Tuple[float, float] = SCALER_FEATURE_RANGE) -> MinMaxScaler:
+def create_standard_scaler(feature_range: Tuple[float, float] = None) -> 'SavgolProcessor':
     """
-    Create a standardized MinMaxScaler with consistent parameters.
+    Create a standardized SavgolProcessor with consistent parameters (matching GINN approach).
     
     Args:
-        feature_range: Range for scaling (default: (0.1, 10.0))
+        feature_range: Not used, kept for compatibility
         
     Returns:
-        Configured MinMaxScaler
+        Configured SavgolProcessor
     """
-    return MinMaxScaler(feature_range=feature_range)
+    return SavgolProcessor()
+
+class SavgolProcessor:
+    """
+    Wrapper class to maintain compatibility with existing code while using smoothing.
+    """
+    def __init__(self):
+        pass
+    
+    def fit_transform(self, X, y=None):
+        """Apply smoothing to training data."""
+        return savgol_positive(X)
+    
+    def transform(self, X):
+        """Apply smoothing to test data."""
+        return savgol_positive(X)
+    
+    def fit(self, X, y=None):
+        """No-op for compatibility."""
+        return self
 
 def get_data_info(X: np.ndarray, y: np.ndarray, feature_names: List[str], target_names: List[str]) -> None:
     """
@@ -88,8 +126,8 @@ def get_data_info(X: np.ndarray, y: np.ndarray, feature_names: List[str], target
     print(f"\nTraining set size: {X_train.shape[0]}")
     print(f"Test set size: {X_test.shape[0]}")
     
-    # Print scaling information
-    print(f"Scaling: MinMaxScaler {SCALER_FEATURE_RANGE}")
+    # Print preprocessing information
+    print(f"Preprocessing: Savgol smoothing + positivity clamp (MIN_POSITIVE={MIN_POSITIVE})")
     print(f"Random state: {RANDOM_STATE}")
     print(f"Test size: {TEST_SIZE}")
 

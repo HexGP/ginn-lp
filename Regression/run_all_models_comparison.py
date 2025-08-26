@@ -34,18 +34,14 @@ def run_linear_regressor(X_train: np.ndarray, y_train: np.ndarray,
     model = MultiTaskLinearRegression(random_state=42)
     model.fit(X_train, y_train, feature_names, target_names)
     
-    # Get predictions in original scale
+    # Get predictions
     y_pred = model.predict(X_test)
     
-    # Scale the test data for evaluation (since models were trained on scaled data)
-    scaler = create_standard_scaler()
-    y_test_scaled = scaler.fit_transform(y_test)
-    y_pred_scaled = scaler.transform(y_pred)
-    
+    # Evaluate directly (no scaling needed since we're using smoothing)
     results = {}
     for i, target_name in enumerate(target_names):
-        mse = np.mean((y_test_scaled[:, i] - y_pred_scaled[:, i])**2)
-        mape = np.mean(np.abs((y_test_scaled[:, i] - y_pred_scaled[:, i]) / y_test_scaled[:, i])) * 100
+        mse = np.mean((y_test[:, i] - y_pred[:, i])**2)
+        mape = np.mean(np.abs((y_test[:, i] - y_pred[:, i]) / y_test[:, i])) * 100
         
         results[target_name] = {
             'MSE': mse,
@@ -63,18 +59,14 @@ def run_gp_regressor(X_train: np.ndarray, y_train: np.ndarray,
     model = MultiTaskGaussianProcess(random_state=42)
     model.fit(X_train, y_train, feature_names, target_names)
     
-    # Get predictions in original scale
+    # Get predictions
     y_pred = model.predict(X_test)
     
-    # Scale the test data for evaluation (since models were trained on scaled data)
-    scaler = create_standard_scaler()
-    y_test_scaled = scaler.fit_transform(y_test)
-    y_pred_scaled = scaler.transform(y_pred)
-    
+    # Evaluate directly (no scaling needed since we're using smoothing)
     results = {}
     for i, target_name in enumerate(target_names):
-        mse = np.mean((y_test_scaled[:, i] - y_pred_scaled[:, i])**2)
-        mape = np.mean(np.abs((y_test_scaled[:, i] - y_pred_scaled[:, i]) / y_test_scaled[:, i])) * 100
+        mse = np.mean((y_test[:, i] - y_pred[:, i])**2)
+        mape = np.mean(np.abs((y_test[:, i] - y_pred[:, i]) / y_test[:, i])) * 100
         
         results[target_name] = {
             'MSE': mse,
@@ -92,18 +84,14 @@ def run_mlp_regressor(X_train: np.ndarray, y_train: np.ndarray,
     model = MLPRegressionModel(random_state=42)
     model.fit(X_train, y_train, feature_names, target_names)
     
-    # Get predictions in original scale
+    # Get predictions
     y_pred = model.predict(X_test)
     
-    # Scale the test data for evaluation (since models were trained on scaled data)
-    scaler = create_standard_scaler()
-    y_test_scaled = scaler.fit_transform(y_test)
-    y_pred_scaled = scaler.transform(y_pred)
-    
+    # Evaluate directly (no scaling needed since we're using smoothing)
     results = {}
     for i, target_name in enumerate(target_names):
-        mse = np.mean((y_test_scaled[:, i] - y_pred_scaled[:, i])**2)
-        mape = np.mean(np.abs((y_test_scaled[:, i] - y_pred_scaled[:, i]) / y_test_scaled[:, i])) * 100
+        mse = np.mean((y_test[:, i] - y_pred[:, i])**2)
+        mape = np.mean(np.abs((y_test[:, i] - y_pred[:, i]) / y_test[:, i])) * 100
         
         results[target_name] = {
             'MSE': mse,
@@ -121,18 +109,14 @@ def run_multiout_regressor(X_train: np.ndarray, y_train: np.ndarray,
     model = MultiOutputRegressionModel(random_state=42)
     model.fit(X_train, y_train, feature_names, target_names)
     
-    # Get predictions in original scale
+    # Get predictions
     y_pred = model.predict(X_test)
     
-    # Scale the test data for evaluation (since models were trained on scaled data)
-    scaler = create_standard_scaler()
-    y_test_scaled = scaler.fit_transform(y_test)
-    y_pred_scaled = scaler.transform(y_pred)
-    
+    # Evaluate directly (no scaling needed since we're using smoothing)
     results = {}
     for i, target_name in enumerate(target_names):
-        mse = np.mean((y_test_scaled[:, i] - y_pred_scaled[:, i])**2)
-        mape = np.mean(np.abs((y_test_scaled[:, i] - y_pred_scaled[:, i]) / y_test_scaled[:, i])) * 100
+        mse = np.mean((y_test[:, i] - y_pred[:, i])**2)
+        mape = np.mean(np.abs((y_test[:, i] - y_pred[:, i]) / y_test[:, i])) * 100
         
         results[target_name] = {
             'MSE': mse,
@@ -150,18 +134,14 @@ def run_sgd_regressor(X_train: np.ndarray, y_train: np.ndarray,
     model = MultiTaskSGDRegressor(random_state=42)
     model.fit(X_train, y_train, feature_names, target_names)
     
-    # Get predictions in original scale
+    # Get predictions
     y_pred = model.predict(X_test)
     
-    # Scale the test data for evaluation (since models were trained on scaled data)
-    scaler = create_standard_scaler()
-    y_test_scaled = scaler.fit_transform(y_test)
-    y_pred_scaled = scaler.transform(y_pred)
-    
+    # Evaluate directly (no scaling needed since we're using smoothing)
     results = {}
     for i, target_name in enumerate(target_names):
-        mse = np.mean((y_test_scaled[:, i] - y_pred_scaled[:, i])**2)
-        mape = np.mean(np.abs((y_test_scaled[:, i] - y_pred_scaled[:, i]) / y_test_scaled[:, i])) * 100
+        mse = np.mean((y_test[:, i] - y_pred[:, i])**2)
+        mape = np.mean(np.abs((y_test[:, i] - y_pred[:, i]) / y_test[:, i])) * 100
         
         results[target_name] = {
             'MSE': mse,
@@ -233,7 +213,7 @@ def print_formatted_table(df: pd.DataFrame):
 def main():
     """Main function to run all models and generate comparison table."""
     
-    print("Loading and preprocessing ENB2012 dataset...")
+    print("Loading and preprocessing dataset with smoothing approach (matching GINN preprocessing)...")
     
     # Load data using shared utilities
     X, y, feature_names, target_names = load_and_preprocess_data()

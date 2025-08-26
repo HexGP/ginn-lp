@@ -67,7 +67,15 @@ dln.L1L2_m = _FixedL1L2
 # --- END: Fix ---
 
 # =============== USER CONFIG ===============
-DATA_CSV = "data/ENB2012_data.csv"   # <--- change to your dataset file
+DATA_CSV = "data/syn_reg.csv"   # <--- change to your dataset file
+
+# Auto-generate output filename based on dataset name
+def get_output_filename(dataset_path):
+    """Extract first three letters from dataset filename for output naming"""
+    dataset_name = os.path.basename(dataset_path).split('.')[0]  # Remove path and extension
+    first_three = dataset_name[:3].upper()  # Take first 3 letters, uppercase
+    return f"ginn_multi_{first_three}.json"
+
 # If you know exact target col names, set them here (otherwise auto-detect below).
 TARGET_COLS = None                    # e.g. ["Y1","Y2"] or leave None to auto-detect
 K_FOLDS = 1                          # Use single fold while debugging faithfulness
@@ -87,7 +95,7 @@ INIT_LR = 5e-5; DECAY_STEPS = 1000  # Reduced from 1e-2 for stability (1e-4)
 BATCH_SIZE = 64  # Increased from 32 for more stable gradients
 EPOCHS = 10000
 VAL_SPLIT = 0.2
-PATIENCE = 100
+PATIENCE = 10000
 TASK_WEIGHTS = [0.5, 0.5]             # Balanced weights for both outputs
 
 # Faithfulness system parameters (ChatGPT Engineering Plan)
@@ -123,6 +131,96 @@ class AnchorSet:
         
         print(f"[AnchorSet] Created with {self.anchor_size} samples")
         print(f"[AnchorSet] Feature floors: {[f'{f:.6f}' for f in self.feature_floors[:3]]}...")
+
+# ---------- POS Dataset Diagnostic Function ----------
+def diagnose_pos_dataset_smoothing(X_raw, Y_raw, X_smoothed, Y_smoothed):
+    """
+    Diagnostic function specifically for POS dataset to check if smoothing is destroying relationships.
+    This helps identify if the synthetic dataset is being over-smoothed.
+    """
+    print("\n" + "="*60)
+    print("🔍 POS DATASET SMOOTHING DIAGNOSTIC")
+    print("="*60)
+    
+    # Check feature relationships before/after smoothing
+    print("📊 FEATURE RELATIONSHIPS:")
+    for i in range(min(5, X_raw.shape[1])):  # Check first 5 features
+        raw_corr = np.corrcoef(X_raw[:, i], Y_raw[:, 0])[0, 1]  # vs first target
+        smooth_corr = np.corrcoef(X_smoothed[:, i], Y_smoothed[:, 0])[0, 1]
+        
+        print(f"   Feature {i}: Raw corr={raw_corr:.4f} → Smooth corr={smooth_corr:.4f}")
+        
+        if abs(raw_corr - smooth_corr) > 0.1:
+            print(f"      ⚠️  WARNING: Correlation changed by {abs(raw_corr - smooth_corr):.3f}")
+    
+    # Check target relationships
+    print("\n📊 TARGET RELATIONSHIPS:")
+    raw_target_corr = np.corrcoef(Y_raw[:, 0], Y_raw[:, 1])[0, 1]
+    smooth_target_corr = np.corrcoef(Y_smoothed[:, 0], Y_smoothed[:, 1])[0, 1]
+    print(f"   Target correlation: Raw={raw_target_corr:.4f} → Smooth={smooth_target_corr:.4f}")
+    
+    # Check variance preservation
+    print("\n📊 VARIANCE PRESERVATION:")
+    for i in range(X_raw.shape[1]):
+        raw_var = np.var(X_raw[:, i])
+        smooth_var = np.var(X_smoothed[:, i])
+        var_ratio = smooth_var / raw_var if raw_var > 0 else 0
+        
+        if var_ratio < 0.5:
+            print(f"   Feature {i}: ⚠️  HIGH VARIANCE LOSS - Raw var={raw_var:.6f} → Smooth var={smooth_var:.6f} (ratio={var_ratio:.3f})")
+        elif var_ratio < 0.8:
+            print(f"   Feature {i}: 🟡 MODERATE VARIANCE LOSS - Raw var={raw_var:.6f} → Smooth var={smooth_var:.6f} (ratio={var_ratio:.3f})")
+        else:
+            print(f"   Feature {i}: ✅ Good variance preservation - Raw var={raw_var:.6f} → Smooth var={smooth_var:.6f} (ratio={var_ratio:.3f})")
+    
+    # Check for over-smoothing indicators
+    print("\n📊 OVER-SMOOTHING INDICATORS:")
+    
+    # Check if smoothed data is too "clean" (low variance)
+    total_variance_loss = 0
+    for i in range(X_raw.shape[1]):
+        raw_var = np.var(X_raw[:, i])
+        smooth_var = np.var(X_smoothed[:, i])
+        if raw_var > 0:
+            total_variance_loss += (raw_var - smooth_var) / raw_var
+    
+    avg_variance_loss = total_variance_loss / X_raw.shape[1]
+    if avg_variance_loss > 0.5:
+        print(f"   🔴 SEVERE OVER-SMOOTHING: Average variance loss = {avg_variance_loss:.1%}")
+        print("      Consider reducing window size or removing smoothing for POS dataset")
+    elif avg_variance_loss > 0.3:
+        print(f"   🟠 MODERATE OVER-SMOOTHING: Average variance loss = {avg_variance_loss:.1%}")
+        print("      Consider reducing window size")
+    else:
+        print(f"   ✅ ACCEPTABLE SMOOTHING: Average variance loss = {avg_variance_loss:.1%}")
+    
+    # Check if synthetic patterns are being destroyed
+    print("\n📊 SYNTHETIC PATTERN PRESERVATION:")
+    
+    # Look for mathematical relationships that should be preserved
+    # For POS dataset, check if power relationships are maintained
+    if X_raw.shape[1] >= 2:
+        # Check if X^2 relationships are preserved
+        raw_power_corr = np.corrcoef(X_raw[:, 0]**2, Y_raw[:, 0])[0, 1]
+        smooth_power_corr = np.corrcoef(X_smoothed[:, 0]**2, Y_smoothed[:, 0])[0, 1]
+        
+        print(f"   X² relationship: Raw corr={raw_power_corr:.4f} → Smooth corr={smooth_power_corr:.4f}")
+        
+        if abs(raw_power_corr - smooth_power_corr) > 0.15:
+            print(f"      ⚠️  WARNING: Power relationship significantly altered!")
+    
+    print("="*60)
+    
+    # Return recommendations
+    recommendations = []
+    if avg_variance_loss > 0.5:
+        recommendations.append("Remove smoothing entirely for POS dataset")
+    elif avg_variance_loss > 0.3:
+        recommendations.append("Reduce smoothing window from 15 to 7 or 5")
+    else:
+        recommendations.append("Current smoothing appears acceptable")
+    
+    return recommendations
 
 # ---------- Data utilities ----------
 def detect_features_and_targets(df, override=None):
@@ -1029,12 +1127,52 @@ def main():
         Y_train, Y_test = Y_raw[tr], Y_raw[te]
 
         # 3) Smoothing (Savitzky–Golay) + positivity clamp; NO SCALING
-        X_train_s = savgol_positive(X_train)
-        Y_train_s = savgol_positive(Y_train)
-        X_test_s  = savgol_positive(X_test)
-        Y_test_s  = savgol_positive(Y_test)
+        # Special handling for different synthetic datasets
+        if "pos_reg" in DATA_CSV.lower():
+            print(f"\n🔧 POS Dataset detected - Using NO smoothing to preserve synthetic patterns")
+            # For POS: use minimal smoothing (window=3) or no smoothing at all
+            # Option 1: Minimal smoothing (preserves some structure) - COMMENTED OUT
+            # X_train_s = savgol_positive(X_train, window_length=3, polyorder=1)
+            # Y_train_s = savgol_positive(Y_train, window_length=3, polyorder=1)
+            # X_test_s  = savgol_positive(X_test, window_length=3, polyorder=1)
+            # Y_test_s  = savgol_positive(Y_test, window_length=3, polyorder=1)
+            
+            # Option 2: No smoothing at all (uncomment if minimal smoothing still destroys patterns) - NOW ACTIVE
+            X_train_s = np.maximum(X_train, MIN_POSITIVE)  # Only positivity clamp
+            Y_train_s = np.maximum(Y_train, MIN_POSITIVE)  # Only positivity clamp
+            X_test_s  = np.maximum(X_test, MIN_POSITIVE)   # Only positivity clamp
+            Y_test_s  = np.maximum(Y_test, MIN_POSITIVE)   # Only positivity clamp
+        elif "syn_reg" in DATA_CSV.lower():
+            print(f"\n🔧 SYN Dataset detected - Using NO smoothing to preserve synthetic patterns")
+            # For SYN: no smoothing since even gentle smoothing destroys 88.8% of variance
+            # Just handle negatives with positivity clamp
+            X_train_s = np.maximum(X_train, MIN_POSITIVE)  # Only positivity clamp
+            Y_train_s = np.maximum(Y_train, MIN_POSITIVE)  # Only positivity clamp
+            X_test_s  = np.maximum(X_test, MIN_POSITIVE)   # Only positivity clamp
+            Y_test_s  = np.maximum(Y_test, MIN_POSITIVE)   # Only positivity clamp
+        else:
+            # For real datasets (like ENB2012): use original smoothing
+            print(f"\n🔧 Real dataset detected - Using standard smoothing (window=15, polyorder=3)")
+            X_train_s = savgol_positive(X_train)  # Default: window=15, polyorder=3
+            Y_train_s = savgol_positive(Y_train)
+            X_test_s  = savgol_positive(X_test)
+            Y_test_s  = savgol_positive(Y_test)
         
-        # 3.5) Create anchor set for faithfulness system
+        # 3.5) Dataset Diagnostic (temporary - remove later)
+        if "pos_reg" in DATA_CSV.lower():
+            print(f"\n🔍 Running POS dataset smoothing diagnostic...")
+            smoothing_recommendations = diagnose_pos_dataset_smoothing(X_train, Y_train, X_train_s, Y_train_s)
+            print(f"\n💡 RECOMMENDATIONS for POS dataset:")
+            for rec in smoothing_recommendations:
+                print(f"   • {rec}")
+        elif "syn_reg" in DATA_CSV.lower():
+            print(f"\n🔍 Running SYN dataset smoothing diagnostic...")
+            smoothing_recommendations = diagnose_pos_dataset_smoothing(X_train, Y_train, X_train_s, Y_train_s)
+            print(f"\n💡 RECOMMENDATIONS for SYN dataset:")
+            for rec in smoothing_recommendations:
+                print(f"   • {rec}")
+        
+        # 3.6) Create anchor set for faithfulness system
         anchor_set = AnchorSet(X_train_s, Y_train_s, anchor_size=CALIBRATION_ANCHOR_SIZE)
 
         # 4) Build GINN model (use it directly; no wrapper)
@@ -1186,6 +1324,7 @@ def main():
             return dict(
                 R2=float(r2_score(y, yhat)),
                 MAE=float(mean_absolute_error(y, yhat)),
+                MSE=float(mean_squared_error(y, yhat)),      # Added MSE
                 RMSE=float(np.sqrt(mean_squared_error(y, yhat))),
                 MAPE=float(calculate_mape(y, yhat))  # Added MAPE for faithfulness analysis
             )
@@ -1212,11 +1351,11 @@ def main():
         for r in per_target:
             print(f"\n🔍 {r['target']}:")
             print(f"   📊 Model Performance (vs Truth):")
-            print(f"      R²: {r['model']['R2']:.4f} | MAE: {r['model']['MAE']:.4f} | RMSE: {r['model']['RMSE']:.4f} | MAPE: {r['model']['MAPE']:.2f}%")
+            print(f"      R²: {r['model']['R2']:.4f} | MAE: {r['model']['MAE']:.4f} | MSE: {r['model']['MSE']:.4f} | RMSE: {r['model']['RMSE']:.4f} | MAPE: {r['model']['MAPE']:.2f}%")
             print(f"   📝 Equation Performance (vs Truth):")
-            print(f"      R²: {r['eq']['R2']:.4f} | MAE: {r['eq']['MAE']:.4f} | RMSE: {r['eq']['RMSE']:.4f} | MAPE: {r['eq']['MAPE']:.2f}%")
+            print(f"      R²: {r['eq']['R2']:.4f} | MAE: {r['eq']['MAE']:.4f} | MSE: {r['eq']['MSE']:.4f} | RMSE: {r['eq']['RMSE']:.4f} | MAPE: {r['eq']['MAPE']:.2f}%")
             print(f"   🔧 Refit Equation Performance (vs Truth):")
-            print(f"      R²: {r['eq_refit']['R2']:.4f} | MAE: {r['eq_refit']['MAE']:.4f} | RMSE: {r['eq_refit']['RMSE']:.4f} | MAPE: {r['eq_refit']['MAPE']:.2f}%")
+            print(f"      R²: {r['eq_refit']['R2']:.4f} | MAE: {r['eq_refit']['MAE']:.4f} | MSE: {r['eq_refit']['MSE']:.4f} | RMSE: {r['eq_refit']['RMSE']:.4f} | MAPE: {r['eq_refit']['MAPE']:.2f}%")
             print(f"   🎯 FAITHFULNESS (Model ↔ Equation):")
             print(f"      Raw: R²={r['R2_model_eq']:.4f} | Refit: R²={r['R2_model_eq_refit']:.4f}")
             
@@ -1287,7 +1426,7 @@ def main():
     
     # 12) Save results
     os.makedirs("outputs", exist_ok=True)
-    out_path = "outputs/ginn_multi_eqsync.json"
+    out_path = f"outputs/{get_output_filename(DATA_CSV)}"
     import json
     with open(out_path, "w") as f:
         json.dump(all_results, f, indent=2)
