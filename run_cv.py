@@ -115,7 +115,7 @@ L1 = 1e-3; L2 = 1e-3
 OUT_L1 = 0.2; OUT_L2 = 0.1
 INIT_LR = 5e-5; DECAY_STEPS = 1000  # Reduced from 1e-2 for stability (1e-4)
 BATCH_SIZE = 64  # Increased from 32 for more stable gradients
-EPOCHS = 10000
+EPOCHS = 2500 #10000 is a good range for the ENB2012 dataset
 VAL_SPLIT = 0.2
 PATIENCE = 10000
 TASK_WEIGHTS = [0.5, 0.5]             # Balanced weights for both outputs
@@ -1509,8 +1509,8 @@ def main():
         test_data_info = {
             'X_test': X_test_s.tolist(),  # Save test features
             'Y_test': Y_test_s.tolist(),  # Save test targets
-            'test_indices': te.tolist(),  # Save test indices
-            'train_indices': tr.tolist(), # Save train indices
+            'test_indices': te if isinstance(te, list) else te.tolist(),  # Save test indices
+            'train_indices': tr if isinstance(tr, list) else tr.tolist(), # Save train indices
             'split_random_state': 42,     # Save random state for reproducibility
             'split_test_size': 0.2        # Save test size
         }
