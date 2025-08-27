@@ -1,8 +1,0 @@
-Metric,Value
-NN_MAPE_Target1,32.9620960354805
-NN_MAPE_Target2,37.678618133068085
-EQ_MAPE_Target1,100.0
-EQ_MAPE_Target2,100.0
-Faithfulness_R2_Target1,-2.864600192480931
-Faithfulness_R2_Target2,-6.282376232223011
-Overall_Faithfulness_%,0.0
