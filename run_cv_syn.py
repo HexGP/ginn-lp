@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-GINN multi-output training + equation extraction + periodic “equation sync”
-(one-file runner; no scaling; Savitzky–Golay smoothing + positivity clamp)
+GINN multi-output training + equation extraction + periodic "equation sync"
+(one-file runner; MinMaxScaler to range (0.1, 10); no Savitzky-Golay smoothing)
 
 What this does:
   • Builds/uses your GINN multi-output model (shared PTA layer + 2 heads)
@@ -11,9 +11,9 @@ What this does:
       - Extracts SymPy equations for y1,y2 (flattens weird nested returns)
       - Evaluates them safely (Laurent terms, no zeros/negatives explode)
       - Optionally refits ONLY numeric constants in the printed equations
-        to better match your (smoothed) data (structure/exponents fixed)
+        to better match your (scaled) data (structure/exponents fixed)
       - Reports R²/MAE/RMSE and faithfulness R²(model ↔ equation)
-  • No scaling; uses Savitzky–Golay smoothing + min-positive clamp.
+  • Uses MinMaxScaler to range (0.1, 10) for consistent scale across features and targets.
 
 Requirements (pip):
   numpy pandas sympy scikit-learn scipy tensorflow
@@ -32,6 +32,7 @@ import sympy as sp
 from sympy.parsing.sympy_parser import parse_expr
 from sklearn.model_selection import KFold
 from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
+from sklearn.preprocessing import MinMaxScaler
 from scipy.signal import savgol_filter
 
 # --- TF / GINN ---
@@ -108,9 +109,9 @@ MIN_POSITIVE = 1e-2                   # clamp after smoothing to avoid zeros/neg
 EPS_LAURENT = 1e-12
 
 # GINN architecture (your description)
-LN_BLOCKS_SHARED = (4,)             # 1 shared layer with 8 PTA blocks
+LN_BLOCKS_SHARED = (6,)             # Increased from 4 to 6 for more capacity
 LIN_BLOCKS_SHARED = (1,)            # must match per GINN builder
-OUTPUT_LN_BLOCKS = 4                  # you said “their own four” per head; set 4
+OUTPUT_LN_BLOCKS = 6                 # Increased from 4 to 6 for complex polynomial outputs
 L1 = 1e-3; L2 = 1e-3
 OUT_L1 = 0.2; OUT_L2 = 0.1
 INIT_LR = 5e-5; DECAY_STEPS = 1000  # Reduced from 1e-2 for stability (1e-4)
@@ -1246,6 +1247,63 @@ class FaithfulnessTrainingWrapper:
 # - Anchor set evaluation: Consistent subset for stable comparisons
 # - Dynamic loss switching: Normal ↔ Faithfulness based on phase
 # - Automatic phase management: Training stops when criteria met
+
+def descale_equation(expr, scaler_X_params, scaler_Y_params, feature_names, target_index=0):
+    """
+    Convert an equation from scaled space (0.1, 10) back to original data space.
+    
+    Args:
+        expr: SymPy expression in scaled space
+        scaler_X_params: Dictionary with scaler_X parameters
+        scaler_Y_params: Dictionary with scaler_Y parameters
+        feature_names: List of feature names
+        target_index: Index of the target (0 for first target, 1 for second, etc.)
+    
+    Returns:
+        SymPy expression in original space
+    """
+    import sympy as sp
+    
+    # Get the scaling parameters from the saved params
+    X_min = np.array(scaler_X_params['data_min_'])
+    X_scale = np.array(scaler_X_params['data_range_'])
+    X_range = scaler_X_params['feature_range'][1] - scaler_X_params['feature_range'][0]
+    
+    # Get scaling parameters for the specific target
+    Y_min = np.array(scaler_Y_params['data_min_'][target_index])
+    Y_scale = np.array(scaler_Y_params['data_range_'][target_index])
+    Y_range = scaler_Y_params['feature_range'][1] - scaler_Y_params['feature_range'][0]
+    
+    # Create substitution dictionary for features
+    substitutions = {}
+    for i, name in enumerate(feature_names):
+        # Original feature: X_orig = X_min[i] + (X_scale[i] / X_range) * (X_scaled - 0.1)
+        # Rearranged: X_scaled = 0.1 + (X_range / X_scale[i]) * (X_orig - X_min[i])
+        # So: X_scaled = (X_range / X_scale[i]) * X_orig + (0.1 - (X_range / X_scale[i]) * X_min[i])
+        scale_factor = X_range / X_scale[i]
+        offset = scaler_X_params['feature_range'][0] - (X_range / X_scale[i]) * X_min[i]
+        
+        # Create symbol for original feature
+        orig_symbol = sp.Symbol(f"X_orig_{i+1}")
+        scaled_symbol = sp.Symbol(f"X_{i+1}")
+        
+        # Substitute: X_scaled = scale_factor * X_orig + offset
+        substitutions[scaled_symbol] = scale_factor * orig_symbol + offset
+    
+    # Apply substitutions to the expression
+    expr_orig = expr.subs(substitutions)
+    
+    # Now handle the output scaling for the specific target
+    # Y_scaled = (Y_range / Y_scale) * (Y_orig - Y_min) + 0.1
+    # Rearranged: Y_orig = Y_min + (Y_scale / Y_range) * (Y_scaled - 0.1)
+    Y_scale_factor = Y_scale / Y_range
+    Y_offset = Y_min - (Y_scale / Y_range) * scaler_Y_params['feature_range'][0]
+    
+    # Final expression: Y_orig = Y_scale_factor * expr_orig + Y_offset
+    final_expr = Y_scale_factor * expr_orig + Y_offset
+    
+    return final_expr
+
 def main():
     # 1) Load data
     df = pd.read_csv(DATA_CSV)
@@ -1277,14 +1335,34 @@ def main():
         X_train, X_test = X_raw[tr], X_raw[te]
         Y_train, Y_test = Y_raw[tr], Y_raw[te]
 
-        # 3) Smoothing (Savitzky–Golay) + positivity clamp; NO SCALING
-        # Use standard smoothing for all datasets
-        print(f"\n🔧 Using standard smoothing (window=15, polyorder=3)")
-        X_train_s = savgol_positive(X_train)  # Default: window=15, polyorder=3
-        Y_train_s = savgol_positive(Y_train)
-        X_test_s  = savgol_positive(X_test)
-        Y_test_s  = savgol_positive(Y_test)
+        # 3) MinMaxScaler scaling to range (0.1, 10) instead of Savitzky-Golay smoothing
+        print(f"\n🔧 Using MinMaxScaler to range (0.1, 10)")
         
+        # Create scalers for features and targets
+        scaler_X = MinMaxScaler(feature_range=(0.1, 10))
+        scaler_Y = MinMaxScaler(feature_range=(0.1, 10))
+        
+        # Fit scalers on training data only (prevent data leakage)
+        X_train_s = scaler_X.fit_transform(X_train)
+        Y_train_s = scaler_Y.fit_transform(Y_train)
+        
+        # Transform test data using fitted scalers
+        X_test_s = scaler_X.transform(X_test)
+        Y_test_s = scaler_Y.transform(Y_test)
+        
+        # Store scalers for later use
+        fold_scalers = {
+            'scaler_X': scaler_X,
+            'scaler_Y': scaler_Y
+        }
+        
+        print(f"   ✅ Benefits of MinMaxScaler (0.1, 10):")
+        print(f"      • Consistent scale across all features and targets")
+        print(f"      • Eliminates scale mismatch issues in equation extraction")
+        print(f"      • Better surrogate model training with balanced coefficients")
+        print(f"      • Equations work directly on scaled data (0.1-10 range)")
+        print(f"      • Descaled equations available for use on original data")
+
         # 3.6) Create anchor set for faithfulness system
         anchor_set = AnchorSet(X_train_s, Y_train_s, anchor_size=CALIBRATION_ANCHOR_SIZE)
 
@@ -1490,6 +1568,21 @@ def main():
                 MAPE=float(calculate_mape(y, yhat))  # Added MAPE for faithfulness analysis
             )
         per_target = []
+        
+        # Prepare scaler parameters for descaling equations
+        scaler_X_params = {
+            'data_min_': scaler_X.data_min_.tolist(),
+            'data_max_': scaler_X.data_max_.tolist(),
+            'data_range_': scaler_X.data_range_.tolist(),
+            'feature_range': scaler_X.feature_range
+        }
+        scaler_Y_params = {
+            'data_min_': scaler_Y.data_min_.tolist(),
+            'data_max_': scaler_Y.data_max_.tolist(),
+            'data_range_': scaler_Y.data_range_.tolist(),
+            'feature_range': scaler_Y.feature_range
+        }
+        
         # Calculate all metrics on TEST DATA (Y_test_s) - this is the true generalization performance
         for j in range(num_outputs):
             m_nn = metrics(Y_test_s[:, j], Yhat_nn[:, j])      # Model vs Test Truth
@@ -1497,12 +1590,31 @@ def main():
             m_eqr= metrics(Y_test_s[:, j], Yhat_eq_refit[:, j]) # Refit Eq vs Test Truth
             r2_nn_eq  = float(r2_score(Yhat_nn[:, j], Yhat_eq[:, j]))
             r2_nn_eqr = float(r2_score(Yhat_nn[:, j], Yhat_eq_refit[:, j]))
+            
+            # Create descaled equations for use on original data
+            expr_descaled = "<n/a>"
+            expr_refit_descaled = "<n/a>"
+            
+            if j < len(exprs) and exprs[j] != "<n/a>":
+                try:
+                    expr_descaled = str(descale_equation(exprs[j], scaler_X_params, scaler_Y_params, feature_cols, target_index=j))
+                except Exception as e:
+                    expr_descaled = f"<descale_error: {e}>"
+            
+            if j < len(exprs_refit) and exprs_refit[j] != "<n/a>":
+                try:
+                    expr_refit_descaled = str(descale_equation(exprs_refit[j], scaler_X_params, scaler_Y_params, feature_cols, target_index=j))
+                except Exception as e:
+                    expr_refit_descaled = f"<descale_error: {e}>"
+            
             per_target.append(dict(
                 target=target_cols[j],
                 model=m_nn, eq=m_eq, eq_refit=m_eqr,
                 R2_model_eq=r2_nn_eq, R2_model_eq_refit=r2_nn_eqr,
-                expr=str(exprs[j]) if j < len(exprs) else "<n/a>",
-                expr_refit=str(exprs_refit[j]) if j < len(exprs_refit) else "<n/a>",
+                expr=str(exprs[j]) if j < len(exprs) else "<n/a>",                    # Scaled equation
+                expr_refit=str(exprs_refit[j]) if j < len(exprs_refit) else "<n/a>",  # Scaled refit equation
+                expr_descaled=expr_descaled,                                          # Descaled equation (original space)
+                expr_refit_descaled=expr_refit_descaled,                              # Descaled refit equation (original space)
             ))
 
         # Save the test data split information for later evaluation
@@ -1512,7 +1624,19 @@ def main():
             'test_indices': te if isinstance(te, list) else te.tolist(),  # Save test indices
             'train_indices': tr if isinstance(tr, list) else tr.tolist(), # Save train indices
             'split_random_state': 42,     # Save random state for reproducibility
-            'split_test_size': 0.2        # Save test size
+            'split_test_size': 0.2,      # Save test size
+            'scaler_X_params': {          # Save scaler parameters instead of object
+                'data_min_': scaler_X.data_min_.tolist(),
+                'data_max_': scaler_X.data_max_.tolist(),
+                'data_range_': scaler_X.data_range_.tolist(),
+                'feature_range': scaler_X.feature_range
+            },
+            'scaler_Y_params': {          # Save scaler parameters instead of object
+                'data_min_': scaler_Y.data_min_.tolist(),
+                'data_max_': scaler_Y.data_max_.tolist(),
+                'data_range_': scaler_Y.data_range_.tolist(),
+                'feature_range': scaler_Y.feature_range
+            }
         }
         
         all_results.append(dict(fold=fold, per_target=per_target, test_data=test_data_info))
@@ -1553,6 +1677,17 @@ def main():
                 print(f"      🟠 Refit Equation: MODERATE Faithfulness (≥0.5)")
             else:
                 print(f"      🔴 Refit Equation: POOR Faithfulness (<0.5)")
+            
+            # Print equations in both scaled and descaled form
+            print(f"   📐 EQUATIONS:")
+            if r['expr'] != "<n/a>":
+                print(f"      🔹 Scaled (0.1-10 range): {r['expr'][:100]}{'...' if len(r['expr']) > 100 else ''}")
+            if r['expr_descaled'] != "<n/a>" and not r['expr_descaled'].startswith('<descale_error'):
+                print(f"      🔹 Descaled (original range): {r['expr_descaled'][:100]}{'...' if len(r['expr_descaled']) > 100 else ''}")
+            if r['expr_refit'] != "<n/a>":
+                print(f"      🔹 Refit Scaled: {r['expr_refit'][:100]}{'...' if len(r['expr_refit']) > 100 else ''}")
+            if r['expr_refit_descaled'] != "<n/a>" and not r['expr_refit_descaled'].startswith('<descale_error'):
+                print(f"      🔹 Refit Descaled: {r['expr_refit_descaled'][:100]}{'...' if len(r['expr_refit_descaled']) > 100 else ''}")
 
     # 11) Overall Faithfulness Summary
     print("\n" + "="*70)

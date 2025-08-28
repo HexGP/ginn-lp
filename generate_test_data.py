@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 import math
 from typing import List, Tuple
+import random
 
 def generate_feature_data(n_samples: int, n_features: int, noise_level: float = 0.1, 
                          random_state: int = 42) -> np.ndarray:
@@ -62,50 +63,54 @@ def generate_feature_data(n_samples: int, n_features: int, noise_level: float = 
 
 def create_target_formulas(n_features: int) -> List[str]:
     """
-    Create mathematical formulas for targets based on number of features.
-    
-    Args:
-        n_features: Number of input features
-    
-    Returns:
-        List of formula strings
+    Create polynomial target formulas for regression.
+    All equations are polynomial to ensure GINN can learn them easily.
     """
     formulas = []
     
-    # Target 1: Complex polynomial with interactions
-    if n_features >= 8:
-        formula1 = f"""
-        (2.5 * X_1**2 + 1.8 * X_2**2 - 0.9 * X_3**2 + 
-         1.2 * X_1 * X_2 - 0.7 * X_2 * X_3 + 0.5 * X_3 * X_4 +
-         0.3 * X_5 + 0.2 * X_6 - 0.1 * X_7 + 0.05 * X_8 + 1.5)
-        """
-    elif n_features >= 6:
-        formula1 = f"""
-        (2.0 * X_1**2 + 1.5 * X_2**2 - 0.8 * X_3**2 + 
-         1.0 * X_1 * X_2 - 0.6 * X_2 * X_3 + 0.4 * X_4 + 0.3 * X_5 + 1.2)
-        """
-    else:
-        formula1 = f"""
-        (1.5 * X_1**2 + 1.2 * X_2**2 + 0.8 * X_1 * X_2 + 0.5 * X_3 + 1.0)
-        """
+    # Target 1: Quadratic polynomial with interactions
+    terms = []
+    for i in range(n_features):
+        # Add quadratic terms
+        terms.append(f"{random.uniform(1.0, 3.0):.1f} * X_{i+1}**2")
+        
+        # Add linear terms
+        terms.append(f"{random.uniform(0.1, 1.0):.1f} * X_{i+1}")
+        
+        # Add interaction terms with next feature
+        if i < n_features - 1:
+            terms.append(f"{random.uniform(0.3, 1.5):.1f} * X_{i+1} * X_{i+2}")
     
-    # Target 2: Trigonometric and exponential relationships
-    if n_features >= 8:
-        formula2 = f"""
-        (3.0 * np.sin(X_1) + 2.0 * np.cos(X_2) + 1.5 * np.exp(-abs(X_3)) +
-         1.0 * X_4 * X_5 + 0.8 * np.tanh(X_6) + 0.6 * X_7 + 0.4 * X_8 + 2.0)
-        """
-    elif n_features >= 6:
-        formula2 = f"""
-        (2.5 * np.sin(X_1) + 1.8 * np.cos(X_2) + 1.2 * np.exp(-abs(X_3)) +
-         0.8 * X_4 + 0.6 * np.tanh(X_5) + 1.5)
-        """
-    else:
-        formula2 = f"""
-        (2.0 * np.sin(X_1) + 1.5 * np.cos(X_2) + 0.8 * np.exp(-abs(X_3)) + 1.0)
-        """
+    # Add constant term
+    terms.append(f"{random.uniform(0.5, 2.0):.1f}")
     
-    formulas = [formula1, formula2]
+    formula1 = " + ".join(terms)
+    formulas.append(formula1)
+    
+    # Target 2: Cubic polynomial with more complex interactions
+    terms2 = []
+    for i in range(n_features):
+        # Add cubic terms
+        terms2.append(f"{random.uniform(0.5, 2.0):.1f} * X_{i+1}**3")
+        
+        # Add quadratic terms
+        terms2.append(f"{random.uniform(1.0, 2.5):.1f} * X_{i+1}**2")
+        
+        # Add linear terms
+        terms2.append(f"{random.uniform(0.2, 0.8):.1f} * X_{i+1}")
+        
+        # Add interaction terms with multiple features
+        if i < n_features - 2:
+            terms2.append(f"{random.uniform(0.1, 1.0):.1f} * X_{i+1} * X_{i+2} * X_{i+3}")
+        elif i < n_features - 1:
+            terms2.append(f"{random.uniform(0.2, 1.2):.1f} * X_{i+1} * X_{i+2}")
+    
+    # Add constant term
+    terms2.append(f"{random.uniform(1.0, 3.0):.1f}")
+    
+    formula2 = " + ".join(terms2)
+    formulas.append(formula2)
+    
     return formulas
 
 def evaluate_formula(formula: str, X: np.ndarray, feature_names: List[str]) -> np.ndarray:
