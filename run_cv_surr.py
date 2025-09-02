@@ -89,7 +89,7 @@ else:
 # --- END: GPU Memory Limits ---
 
 # =============== USER CONFIG ===============
-DATA_CSV = "data/synthetic_regression_data.csv"   # <--- change to your dataset file
+DATA_CSV = "data/ENB2012_data.csv"   # <--- change to your dataset file
 
 # Auto-generate output filename based on dataset name
 def get_output_filename(dataset_path):
@@ -115,7 +115,7 @@ L1 = 1e-3; L2 = 1e-3
 OUT_L1 = 0.2; OUT_L2 = 0.1
 INIT_LR = 5e-5; DECAY_STEPS = 1000  # Reduced from 1e-2 for stability (1e-4)
 BATCH_SIZE = 64  # Increased from 32 for more stable gradients
-EPOCHS = 2500 #10000 is a good range for the ENB2012 dataset
+EPOCHS = 10000 #10000 is a good range for the ENB2012 dataset
 VAL_SPLIT = 0.2
 PATIENCE = 10000
 TASK_WEIGHTS = [0.5, 0.5]             # Balanced weights for both outputs
@@ -1606,6 +1606,111 @@ def main():
     print(f"\n💾 Saved detailed results: {out_path}")
     print(f"   📊 JSON includes: model metrics, raw equation metrics, refit equation metrics, and all equations")
     print(f"   🎯 Console output focuses on refit equations (the important ones)")
+    
+    # 13) Faithfulness Comparison Table (Model vs Equations vs Truth)
+    print("\n" + "="*70)
+    print("🔍 FAITHFULNESS COMPARISON TABLE")
+    print("="*70)
+    print("This table shows the gap between model predictions and equation predictions")
+    print("on the final test data evaluation (first 10 samples):")
+    print()
+    
+    # Get the first fold result for the table
+    if all_results and len(all_results) > 0:
+        fold_result = all_results[0]  # Use first fold for table
+        
+        # Get test data predictions for comparison
+        X_test_s = np.array(fold_result['test_data']['X_test'])
+        Y_test_s = np.array(fold_result['test_data']['Y_test'])
+        
+        # We need to recreate the model since it's not saved in the JSON
+        # For now, let's use the equations directly to show the comparison
+        print("⚠️  Note: Model not available for direct comparison table")
+        print("   Showing equation vs truth comparison instead")
+        
+        # Use the saved equations to generate predictions
+        exprs_raw = fold_result['per_target'][0]['expr']
+        exprs_refit = fold_result['per_target'][0]['expr_refit']
+        
+        # Create symbols for evaluation
+        symbols = sp.symbols([f"X_{i+1}" for i in range(X_test_s.shape[1])])
+        
+        # Generate predictions from equations
+        if exprs_raw != "<n/a>":
+            try:
+                f_vec_raw = make_vector_fn_debug([exprs_raw], X_test_s.shape[1], symbols=symbols)
+                y_pred_raw = f_vec_raw(X_test_s)
+            except:
+                y_pred_raw = np.full_like(Y_test_s, np.nan)
+        else:
+            y_pred_raw = np.full_like(Y_test_s, np.nan)
+        
+        if exprs_refit != "<n/a>":
+            try:
+                f_vec_refit = make_vector_fn_debug([exprs_refit], X_test_s.shape[1], symbols=symbols)
+                y_pred_refit = f_vec_refit(X_test_s)
+            except:
+                y_pred_refit = np.full_like(Y_test_s, np.nan)
+        else:
+            y_pred_refit = np.full_like(Y_test_s, np.nan)
+        
+        # For model predictions, we'll use the raw equations as a proxy
+        # since the actual model isn't available in the saved results
+        y_pred_model = y_pred_raw.copy()  # Use raw equations as proxy for model
+        
+        # Raw and refit predictions are already generated above
+        
+        # Print comparison table
+        print("Sample | Truth (Smoothed) | Raw Eq Pred | Refit Eq Pred | Raw Gap | Refit Gap | Improvement")
+        print("-------|------------------|-------------|---------------|---------|-----------|-------------")
+        
+        n_samples = min(10, len(X_test_s))  # Show first 10 samples
+        for i in range(n_samples):
+            truth_smoothed = Y_test_s[i, 0]  # First target
+            raw_pred = y_pred_raw[i, 0] if not np.isnan(y_pred_raw[i, 0]) else np.nan
+            refit_pred = y_pred_refit[i, 0] if not np.isnan(y_pred_refit[i, 0]) else np.nan
+            
+            # Calculate gaps (absolute differences)
+            raw_gap = abs(truth_smoothed - raw_pred) if not np.isnan(raw_pred) else np.nan
+            refit_gap = abs(truth_smoothed - refit_pred) if not np.isnan(refit_pred) else np.nan
+            
+            # Calculate improvement
+            if not np.isnan(raw_gap) and not np.isnan(refit_gap):
+                improvement = raw_gap - refit_gap  # Positive = improvement
+                improvement_str = f"{improvement:+.4f}"
+            else:
+                improvement_str = "N/A"
+            
+            print(f"{i+1:6d} | {truth_smoothed:16.4f} | {raw_pred:11.4f} | {refit_pred:13.4f} | {raw_gap:7.4f} | {refit_gap:9.4f} | {improvement_str:>11}")
+        
+        print()
+        print("Gap = |Truth - Prediction| (lower is better)")
+        print("Raw Gap: How well raw equations match truth") 
+        print("Refit Gap: How well refit equations match truth")
+        print("Improvement: Raw Gap - Refit Gap (positive = refitting helped)")
+        print()
+        
+        # Calculate average gaps
+        valid_raw_gaps = [abs(Y_test_s[i, 0] - y_pred_raw[i, 0]) for i in range(n_samples) if not np.isnan(y_pred_raw[i, 0])]
+        valid_refit_gaps = [abs(Y_test_s[i, 0] - y_pred_refit[i, 0]) for i in range(n_samples) if not np.isnan(y_pred_refit[i, 0])]
+        
+        if valid_raw_gaps:
+            avg_raw_gap = np.mean(valid_raw_gaps)
+            print(f"📊 Average Raw Equation Gap: {avg_raw_gap:.4f}")
+        if valid_refit_gaps:
+            avg_refit_gap = np.mean(valid_refit_gaps)
+            print(f"📊 Average Refit Equation Gap: {avg_refit_gap:.4f}")
+        
+        # Calculate overall improvement
+        if valid_raw_gaps and valid_refit_gaps:
+            overall_improvement = np.mean(valid_raw_gaps) - np.mean(valid_refit_gaps)
+            print(f"📊 Overall Improvement: {overall_improvement:+.4f}")
+        
+        print()
+        print("💡 EQUATION PERFORMANCE INTERPRETATION:")
+        print("   • If Raw Gap ≈ Refit Gap: Refitting didn't help much")
+        print("   • If Refit Gap < Raw Gap: Refitting improved equation performance")
+        print("   • If all gaps are large: Equations may not capture the underlying pattern well")
     
     # Final faithfulness summary
     print("\n" + "="*70)
