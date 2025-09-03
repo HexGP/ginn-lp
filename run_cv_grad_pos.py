@@ -105,12 +105,18 @@ else:
 # =============== USER CONFIG ===============
 DATA_CSV = "data/pos_reg.csv"   # <--- change to your dataset file
 
-# Auto-generate output filename based on dataset name
+# Auto-generate output filename based on dataset name and architecture
 def get_output_filename(dataset_path):
-    """Extract first three letters from dataset filename for output naming"""
+    """Extract first three letters from dataset filename and include architecture info"""
     dataset_name = os.path.basename(dataset_path).split('.')[0]  # Remove path and extension
     first_three = dataset_name[:3].upper()  # Take first 3 letters, uppercase
-    return f"ginn_grad_{first_three}_pos.json"
+    
+    # Extract architecture info from global config
+    num_layers = len(LN_BLOCKS_SHARED)  # Number of shared layers
+    blocks_per_layer = LN_BLOCKS_SHARED[0] if LN_BLOCKS_SHARED else 0  # PTA blocks per layer
+    output_blocks = OUTPUT_LN_BLOCKS  # Output layer blocks
+    
+    return f"grad_{first_three}_{num_layers}S_{blocks_per_layer}B_{output_blocks}L.json"
 
 # If you know exact target col names, set them here (otherwise auto-detect below).
 TARGET_COLS = None                    # e.g. ["Y1","Y2"] or leave None to auto-detect
@@ -122,9 +128,9 @@ MIN_POSITIVE = 1e-2                   # clamp after smoothing to avoid zeros/neg
 EPS_LAURENT = 1e-12
 
 # GINN architecture (your description)
-LN_BLOCKS_SHARED = (4,)             # 1 shared layer with 8 PTA blocks
-LIN_BLOCKS_SHARED = (1,)            # must match per GINN builder
-OUTPUT_LN_BLOCKS = 4                  # you said “their own four” per head; set 4
+LN_BLOCKS_SHARED = (6, 6,)             # 1 shared layer with 8 PTA blocks
+LIN_BLOCKS_SHARED = (1, 1,)            # must match per GINN builder
+OUTPUT_LN_BLOCKS = 6                  # you said “their own four” per head; set 4
 L1 = 1e-3; L2 = 1e-3
 OUT_L1 = 0.2; OUT_L2 = 0.1
 INIT_LR = 5e-5; DECAY_STEPS = 1000  # Reduced from 1e-2 for stability (1e-4)
@@ -2029,7 +2035,16 @@ def main():
             'split_test_size': 0.2        # Save test size
         }
         
-        all_results.append(dict(fold=fold, per_target=per_target, test_data=test_data_info))
+        # Add architecture information
+        architecture_info = {
+            'shared_layers': len(LN_BLOCKS_SHARED),
+            'pta_blocks_per_layer': LN_BLOCKS_SHARED[0] if LN_BLOCKS_SHARED else 0,
+            'output_pta_blocks': OUTPUT_LN_BLOCKS,
+            'total_shared_pta_blocks': sum(LN_BLOCKS_SHARED),
+            'architecture_description': f"{len(LN_BLOCKS_SHARED)} shared layers with {LN_BLOCKS_SHARED[0] if LN_BLOCKS_SHARED else 0} PTA blocks each, {OUTPUT_LN_BLOCKS} output PTA blocks"
+        }
+        
+        all_results.append(dict(fold=fold, architecture=architecture_info, per_target=per_target, test_data=test_data_info))
         # Pretty print with enhanced faithfulness analysis
         # NOTE: All performance metrics below are from TEST DATA evaluation (true generalization)
         print("\n" + "="*70)
@@ -2175,7 +2190,7 @@ def main():
         # Raw and refit predictions are already generated above
         
         # Print comparison table
-        print("Sample | Truth (Smoothed) | Raw Eq Pred | Refit Eq Pred | Raw Gap | Refit Gap | Improvement")
+        print("Sample | Truth (Scaled) | Raw Eq Pred | Refit Eq Pred | Raw Gap | Refit Gap | Improvement")
         print("-------|------------------|-------------|---------------|---------|-----------|-------------")
         
         n_samples = min(10, len(X_test_s))  # Show first 10 samples
