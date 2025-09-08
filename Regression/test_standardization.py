@@ -15,7 +15,7 @@ from sklearn.preprocessing import MinMaxScaler
 sys.path.append(os.path.dirname(__file__))
 
 # Import shared utilities
-from shared_data_utils import (
+from data_utils_ENB import (
     load_and_preprocess_data, 
     get_train_test_split, 
     create_standard_scaler,

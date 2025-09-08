@@ -128,9 +128,9 @@ MIN_POSITIVE = 1e-2                   # clamp after smoothing to avoid zeros/neg
 EPS_LAURENT = 1e-12
 
 # GINN architecture (your description)
-LN_BLOCKS_SHARED = (6, 6,)             # 1 shared layer with 8 PTA blocks
-LIN_BLOCKS_SHARED = (1, 1,)            # must match per GINN builder
-OUTPUT_LN_BLOCKS = 6                  # you said “their own four” per head; set 4
+LN_BLOCKS_SHARED = (4, )             # 1 shared layer with 8 PTA blocks
+LIN_BLOCKS_SHARED = (1, )            # must match per GINN builder
+OUTPUT_LN_BLOCKS = 4                  # you said “their own four” per head; set 4
 L1 = 1e-3; L2 = 1e-3
 OUT_L1 = 0.2; OUT_L2 = 0.1
 INIT_LR = 5e-5; DECAY_STEPS = 1000  # Reduced from 1e-2 for stability (1e-4)

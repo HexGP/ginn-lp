@@ -1,0 +1,111 @@
+{
+  "dataset_info": {
+    "name": "POS",
+    "preprocessing": "MinMaxScaler to range (0.1, 10)",
+    "scaling_parameters": {
+      "feature_range": [
+        0.1,
+        10
+      ],
+      "min_positive": 0.01
+    }
+  },
+  "target_names": [
+    "target_0",
+    "target_1"
+  ],
+  "model_results": [
+    {
+      "target_0_MSE": 2.3889284878749404,
+      "target_0_MAPE": 1.2516968856308726,
+      "target_1_MSE": 2.2018597216927533,
+      "target_1_MAPE": 1.2348469181383566,
+      "Avg_MSE": 2.295394104783847,
+      "Avg_MAPE": 1.2432719018846146,
+      "Model": "Linear Regressor"
+    },
+    {
+      "target_0_MSE": 2.35773626575614,
+      "target_0_MAPE": 1.2657422661405304,
+      "target_1_MSE": 2.1479793229746464,
+      "target_1_MAPE": 1.2448904168425268,
+      "Avg_MSE": 2.252857794365393,
+      "Avg_MAPE": 1.2553163414915285,
+      "Model": "MLP Regressor"
+    },
+    {
+      "target_0_MSE": 2.3639128209790936,
+      "target_0_MAPE": 1.2134138788060547,
+      "target_1_MSE": 2.2516512656050063,
+      "target_1_MAPE": 1.2080716157730016,
+      "Avg_MSE": 2.30778204329205,
+      "Avg_MAPE": 1.2107427472895282,
+      "Model": "GP Regressor"
+    },
+    {
+      "target_0_MSE": 2.4547462355313323,
+      "target_0_MAPE": 1.2285796168202225,
+      "target_1_MSE": 2.3188884660222615,
+      "target_1_MAPE": 1.2670486509775156,
+      "Avg_MSE": 2.3868173507767967,
+      "Avg_MAPE": 1.247814133898869,
+      "Model": "MultiOutput Regressor"
+    },
+    {
+      "target_0_MSE": 2.413088019860847,
+      "target_0_MAPE": 1.2654844912297876,
+      "target_1_MSE": 2.1958476252611008,
+      "target_1_MAPE": 1.2247801352333567,
+      "Avg_MSE": 2.304467822560974,
+      "Avg_MAPE": 1.2451323132315721,
+      "Model": "SGD Regressor"
+    }
+  ],
+  "comparison_table": [
+    {
+      "Model": "Linear Regressor",
+      "Y1_MSE": 2.3889284878749404,
+      "Y2_MSE": 2.2018597216927533,
+      "Avg_MSE": 2.295394104783847,
+      "Y1_MAPE": 1.2516968856308726,
+      "Y2_MAPE": 1.2348469181383566,
+      "Avg_MAPE": 1.2432719018846146
+    },
+    {
+      "Model": "MLP Regressor",
+      "Y1_MSE": 2.35773626575614,
+      "Y2_MSE": 2.1479793229746464,
+      "Avg_MSE": 2.252857794365393,
+      "Y1_MAPE": 1.2657422661405304,
+      "Y2_MAPE": 1.2448904168425268,
+      "Avg_MAPE": 1.2553163414915285
+    },
+    {
+      "Model": "GP Regressor",
+      "Y1_MSE": 2.3639128209790936,
+      "Y2_MSE": 2.2516512656050063,
+      "Avg_MSE": 2.30778204329205,
+      "Y1_MAPE": 1.2134138788060547,
+      "Y2_MAPE": 1.2080716157730016,
+      "Avg_MAPE": 1.2107427472895282
+    },
+    {
+      "Model": "MultiOutput Regressor",
+      "Y1_MSE": 2.4547462355313323,
+      "Y2_MSE": 2.3188884660222615,
+      "Avg_MSE": 2.3868173507767967,
+      "Y1_MAPE": 1.2285796168202225,
+      "Y2_MAPE": 1.2670486509775156,
+      "Avg_MAPE": 1.247814133898869
+    },
+    {
+      "Model": "SGD Regressor",
+      "Y1_MSE": 2.413088019860847,
+      "Y2_MSE": 2.1958476252611008,
+      "Avg_MSE": 2.304467822560974,
+      "Y1_MAPE": 1.2654844912297876,
+      "Y2_MAPE": 1.2247801352333567,
+      "Avg_MAPE": 1.2451323132315721
+    }
+  ]
+}
