@@ -8,7 +8,21 @@ import os
 import pandas as pd
 
 def main():
-    folder_path = "JSON_ENB"
+    # Uncomment the folder_path you want to use and comment out the others
+    # folder_path = "JSON_ENB"
+    # folder_path = "JSON_ENB_smoothed"
+    # folder_path = "JSON_ENB_scaled"
+    folder_path = "JSON_ENB_shifted"
+    
+    # Determine data preprocessing type based on folder path
+    if "smoothed" in folder_path:
+        data_type = "Smoothed"
+    elif "scaled" in folder_path:
+        data_type = "Scaled"
+    elif "shifted" in folder_path:
+        data_type = "Shifted"
+    else:
+        data_type = "Original"
     
     # Get all JSON files
     json_files = [f for f in os.listdir(folder_path) if f.endswith('.json')]
@@ -109,7 +123,7 @@ def main():
     if summary_rows:
         df = pd.DataFrame(summary_rows)
         print("\n" + "="*120)
-        print("ENB METRICS TABLE")
+        print(f"ENB METRICS TABLE - {data_type} Data")
         print("="*120)
         print(df.to_string(index=False))
         print("="*120)
