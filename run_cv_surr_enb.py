@@ -102,7 +102,7 @@ def get_output_filename(dataset_path):
     blocks_per_layer = LN_BLOCKS_SHARED[0] if LN_BLOCKS_SHARED else 0  # PTA blocks per layer
     output_blocks = OUTPUT_LN_BLOCKS  # Output layer blocks
     
-    return f"surr_{first_three}_{num_layers}S_{blocks_per_layer}B_{output_blocks}L.json"
+    return f"outputs/JSON_ENB/surr_{first_three}_{num_layers}S_{blocks_per_layer}B_{output_blocks}L.json"
 
 # If you know exact target col names, set them here (otherwise auto-detect below).
 TARGET_COLS = None                    # e.g. ["Y1","Y2"] or leave None to auto-detect
@@ -114,8 +114,8 @@ MIN_POSITIVE = 1e-2                   # clamp after smoothing to avoid zeros/neg
 EPS_LAURENT = 1e-12
 
 # GINN architecture (your description)
-LN_BLOCKS_SHARED = (4,)             # 1 shared layer with 8 PTA blocks
-LIN_BLOCKS_SHARED = (1,)            # must match per GINN builder
+LN_BLOCKS_SHARED = (4, 4,)             # 1 shared layer with 8 PTA blocks
+LIN_BLOCKS_SHARED = (1, 1)            # must match per GINN builder
 OUTPUT_LN_BLOCKS = 4                  # you said “their own four” per head; set 4
 L1 = 1e-3; L2 = 1e-3
 OUT_L1 = 0.2; OUT_L2 = 0.1
@@ -1613,8 +1613,8 @@ def main():
         print("   Focus on improving equation extraction and refitting")
     
     # 12) Save results
-    os.makedirs("outputs", exist_ok=True)
-    out_path = f"outputs/{get_output_filename(DATA_CSV)}"
+    os.makedirs("outputs/JSON_ENB", exist_ok=True)
+    out_path = get_output_filename(DATA_CSV)
     import json
     with open(out_path, "w") as f:
         json.dump(all_results, f, indent=2)

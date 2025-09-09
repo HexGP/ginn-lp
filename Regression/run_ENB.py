@@ -37,7 +37,7 @@ def run_linear_regressor(X_train: np.ndarray, y_train: np.ndarray,
     # Get predictions
     y_pred = model.predict(X_test)
     
-    # Evaluate directly (no scaling needed since we're using smoothing)
+    # Evaluate directly (NO SCALING - only smoothing for fair comparison)
     results = {}
     for i, target_name in enumerate(target_names):
         mse = np.mean((y_test[:, i] - y_pred[:, i])**2)
@@ -62,7 +62,7 @@ def run_gp_regressor(X_train: np.ndarray, y_train: np.ndarray,
     # Get predictions
     y_pred = model.predict(X_test)
     
-    # Evaluate directly (no scaling needed since we're using smoothing)
+    # Evaluate directly (NO SCALING - only smoothing for fair comparison)
     results = {}
     for i, target_name in enumerate(target_names):
         mse = np.mean((y_test[:, i] - y_pred[:, i])**2)
@@ -87,7 +87,7 @@ def run_mlp_regressor(X_train: np.ndarray, y_train: np.ndarray,
     # Get predictions
     y_pred = model.predict(X_test)
     
-    # Evaluate directly (no scaling needed since we're using smoothing)
+    # Evaluate directly (NO SCALING - only smoothing for fair comparison)
     results = {}
     for i, target_name in enumerate(target_names):
         mse = np.mean((y_test[:, i] - y_pred[:, i])**2)
@@ -112,7 +112,7 @@ def run_multiout_regressor(X_train: np.ndarray, y_train: np.ndarray,
     # Get predictions
     y_pred = model.predict(X_test)
     
-    # Evaluate directly (no scaling needed since we're using smoothing)
+    # Evaluate directly (NO SCALING - only smoothing for fair comparison)
     results = {}
     for i, target_name in enumerate(target_names):
         mse = np.mean((y_test[:, i] - y_pred[:, i])**2)
@@ -137,7 +137,7 @@ def run_sgd_regressor(X_train: np.ndarray, y_train: np.ndarray,
     # Get predictions
     y_pred = model.predict(X_test)
     
-    # Evaluate directly (no scaling needed since we're using smoothing)
+    # Evaluate directly (NO SCALING - only smoothing for fair comparison)
     results = {}
     for i, target_name in enumerate(target_names):
         mse = np.mean((y_test[:, i] - y_pred[:, i])**2)
@@ -218,7 +218,7 @@ def save_detailed_results_to_json(all_results, comparison_df, target_names, outp
     json_results = {
         "dataset_info": {
             "name": "ENB2012_data.csv",
-            "preprocessing": "Savgol smoothing + positivity clamp",
+            "preprocessing": "Savgol smoothing + positivity clamp ONLY (NO SCALING for fair comparison)",
             "window_length": 15,
             "polynomial_order": 3,
             "min_positive": 0.01
@@ -244,7 +244,7 @@ def save_detailed_results_to_json(all_results, comparison_df, target_names, outp
 def main():
     """Main function to run all models and generate comparison table."""
     
-    print("Loading and preprocessing dataset with smoothing approach (matching GINN preprocessing)...")
+    print("Loading and preprocessing dataset with smoothing approach ONLY (NO SCALING for fair comparison)...")
     
     # Load data using shared utilities
     X, y, feature_names, target_names = load_and_preprocess_data()

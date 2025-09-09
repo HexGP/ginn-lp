@@ -116,7 +116,7 @@ def get_output_filename(dataset_path):
     blocks_per_layer = LN_BLOCKS_SHARED[0] if LN_BLOCKS_SHARED else 0  # PTA blocks per layer
     output_blocks = OUTPUT_LN_BLOCKS  # Output layer blocks
     
-    return f"grad_{first_three}_{num_layers}S_{blocks_per_layer}B_{output_blocks}L.json"
+    return f"outputs/JSON_ENB/grad_{first_three}_{num_layers}S_{blocks_per_layer}B_{output_blocks}L.json"
 
 # If you know exact target col names, set them here (otherwise auto-detect below).
 TARGET_COLS = None                    # e.g. ["Y1","Y2"] or leave None to auto-detect
@@ -2124,8 +2124,8 @@ def main():
         print("   Focus on improving equation extraction and refitting")
     
     # 12) Save results
-    os.makedirs("outputs", exist_ok=True)
-    out_path = f"outputs/{get_output_filename(DATA_CSV)}"
+    os.makedirs("outputs/JSON_ENB", exist_ok=True)
+    out_path = get_output_filename(DATA_CSV)
     import json
     with open(out_path, "w") as f:
         json.dump(all_results, f, indent=2)

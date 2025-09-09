@@ -61,7 +61,7 @@ def run_single_model(model_name: str, model_class, X_train: np.ndarray, X_test: 
         results = {}
         for i, target in enumerate(target_names):
             mse = mean_squared_error(y_test[:, i], y_pred[:, i])
-            mape = mean_absolute_percentage_error(y_test[:, i], y_pred[:, i])
+            mape = mean_absolute_percentage_error(y_test[:, i], y_pred[:, i]) * 100
             
             results[f'{target}_MSE'] = mse
             results[f'{target}_MAPE'] = mape

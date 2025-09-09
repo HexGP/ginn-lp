@@ -121,6 +121,7 @@ def get_train_test_split(X: np.ndarray, y: np.ndarray,
 def create_standard_scaler(feature_range: Tuple[float, float] = None) -> 'SavgolProcessor':
     """
     Create a standardized SavgolProcessor with consistent parameters (matching GINN approach).
+    NO SCALING - only smoothing for fair comparison.
     
     Args:
         feature_range: Not used, kept for compatibility
@@ -133,7 +134,7 @@ def create_standard_scaler(feature_range: Tuple[float, float] = None) -> 'Savgol
 class NoOpScaler:
     """
     No-operation scaler that returns data unchanged.
-    Used when data is already scaled in load_and_preprocess_data().
+    Used for fair comparison - NO SCALING, only smoothing.
     """
     def fit_transform(self, X, y=None):
         """Return data unchanged."""
@@ -186,7 +187,8 @@ def get_data_info(X: np.ndarray, y: np.ndarray, feature_names: List[str], target
     print(f"Test set size: {X_test.shape[0]}")
     
     # Print preprocessing information
-    print(f"Preprocessing: Savgol smoothing + positivity clamp (MIN_POSITIVE={MIN_POSITIVE})")
+    print(f"Preprocessing: Savgol smoothing + positivity clamp ONLY (NO SCALING for fair comparison)")
+    print(f"MIN_POSITIVE: {MIN_POSITIVE}")
     print(f"Random state: {RANDOM_STATE}")
     print(f"Test size: {TEST_SIZE}")
 

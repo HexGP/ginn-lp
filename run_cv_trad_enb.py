@@ -102,7 +102,7 @@ def get_output_filename(dataset_path):
     blocks_per_layer = LN_BLOCKS_SHARED[0] if LN_BLOCKS_SHARED else 0  # PTA blocks per layer
     output_blocks = OUTPUT_LN_BLOCKS  # Output layer blocks
     
-    return f"trad_{first_three}_{num_layers}S_{blocks_per_layer}B_{output_blocks}L.json"
+    return f"outputs/JSON_ENB/trad_{first_three}_{num_layers}S_{blocks_per_layer}B_{output_blocks}L.json"
 
 # If you know exact target col names, set them here (otherwise auto-detect below).
 TARGET_COLS = None                    # e.g. ["Y1","Y2"] or leave None to auto-detect
@@ -114,9 +114,9 @@ MIN_POSITIVE = 1e-2                   # clamp after smoothing to avoid zeros/neg
 EPS_LAURENT = 1e-12
 
 # GINN architecture (your description)
-LN_BLOCKS_SHARED = (4,)             # 1 shared layer with 8 PTA blocks
-LIN_BLOCKS_SHARED = (1,)            # must match per GINN builder
-OUTPUT_LN_BLOCKS = 4                  # you said “their own four” per head; set 4
+LN_BLOCKS_SHARED = (6, 6,)             # 1 shared layer with 8 PTA blocks
+LIN_BLOCKS_SHARED = (1, 1)            # must match per GINN builder
+OUTPUT_LN_BLOCKS = 6                  # you said “their own four” per head; set 4
 L1 = 1e-3; L2 = 1e-3
 OUT_L1 = 0.2; OUT_L2 = 0.1
 INIT_LR = 5e-5; DECAY_STEPS = 1000  # Reduced from 1e-2 for stability (1e-4)
@@ -1252,8 +1252,8 @@ def main():
         test_data_info = {
             'X_test': X_test_s.tolist(),  # Save test features
             'Y_test': Y_test_s.tolist(),  # Save test targets
-            'test_indices': te.tolist(),  # Save test indices
-            'train_indices': tr.tolist(), # Save train indices
+            'test_indices': te if isinstance(te, list) else te.tolist(),  # Save test indices
+            'train_indices': tr if isinstance(tr, list) else tr.tolist(), # Save train indices
             'split_random_state': 42,     # Save random state for reproducibility
             'split_test_size': 0.2        # Save test size
         }
@@ -1351,14 +1351,119 @@ def main():
         print("   Focus on improving equation extraction and refitting")
     
     # 12) Save results
-    os.makedirs("outputs", exist_ok=True)
-    out_path = f"outputs/{get_output_filename(DATA_CSV)}"
+    os.makedirs("outputs/JSON_ENB", exist_ok=True)
+    out_path = get_output_filename(DATA_CSV)
     import json
     with open(out_path, "w") as f:
         json.dump(all_results, f, indent=2)
     print(f"\n💾 Saved detailed results: {out_path}")
     print(f"   📊 JSON includes: model metrics, raw equation metrics, refit equation metrics, and all equations")
     print(f"   🎯 Console output focuses on refit equations (the important ones)")
+    
+    # 13) Faithfulness Comparison Table (Model vs Equations vs Truth)
+    print("\n" + "="*70)
+    print("🔍 FAITHFULNESS COMPARISON TABLE")
+    print("="*70)
+    print("This table shows the gap between model predictions and equation predictions")
+    print("on the final test data evaluation (first 10 samples):")
+    print()
+    
+    # Get the first fold result for the table
+    if all_results and len(all_results) > 0:
+        fold_result = all_results[0]  # Use first fold for table
+        
+        # Get test data predictions for comparison
+        X_test_s = np.array(fold_result['test_data']['X_test'])
+        Y_test_s = np.array(fold_result['test_data']['Y_test'])
+        
+        # We need to recreate the model since it's not saved in the JSON
+        # For now, let's use the equations directly to show the comparison
+        print("⚠️  Note: Model not available for direct comparison table")
+        print("   Showing equation vs truth comparison instead")
+        
+        # Use the saved equations to generate predictions
+        exprs_raw = fold_result['per_target'][0]['expr']
+        exprs_refit = fold_result['per_target'][0]['expr_refit']
+        
+        # Create symbols for evaluation
+        symbols = sp.symbols([f"X_{i+1}" for i in range(X_test_s.shape[1])])
+        
+        # Generate predictions from equations
+        if exprs_raw != "<n/a>":
+            try:
+                f_vec_raw = make_vector_fn_debug([exprs_raw], X_test_s.shape[1], symbols=symbols)
+                y_pred_raw = f_vec_raw(X_test_s)
+            except:
+                y_pred_raw = np.full_like(Y_test_s, np.nan)
+        else:
+            y_pred_raw = np.full_like(Y_test_s, np.nan)
+        
+        if exprs_refit != "<n/a>":
+            try:
+                f_vec_refit = make_vector_fn_debug([exprs_refit], X_test_s.shape[1], symbols=symbols)
+                y_pred_refit = f_vec_refit(X_test_s)
+            except:
+                y_pred_refit = np.full_like(Y_test_s, np.nan)
+        else:
+            y_pred_refit = np.full_like(Y_test_s, np.nan)
+        
+        # For model predictions, we'll use the raw equations as a proxy
+        # since the actual model isn't available in the saved results
+        y_pred_model = y_pred_raw.copy()  # Use raw equations as proxy for model
+        
+        # Raw and refit predictions are already generated above
+        
+        # Print comparison table
+        print("Sample | Truth (Scaled) | Raw Eq Pred | Refit Eq Pred | Raw Gap | Refit Gap | Improvement")
+        print("-------|------------------|-------------|---------------|---------|-----------|-------------")
+        
+        n_samples = min(10, len(X_test_s))  # Show first 10 samples
+        for i in range(n_samples):
+            truth_smoothed = Y_test_s[i, 0]  # First target
+            raw_pred = y_pred_raw[i, 0] if not np.isnan(y_pred_raw[i, 0]) else np.nan
+            refit_pred = y_pred_refit[i, 0] if not np.isnan(y_pred_refit[i, 0]) else np.nan
+            
+            # Calculate gaps (absolute differences)
+            raw_gap = abs(truth_smoothed - raw_pred) if not np.isnan(raw_pred) else np.nan
+            refit_gap = abs(truth_smoothed - refit_pred) if not np.isnan(refit_pred) else np.nan
+            
+            # Calculate improvement
+            if not np.isnan(raw_gap) and not np.isnan(refit_gap):
+                improvement = raw_gap - refit_gap  # Positive = improvement
+                improvement_str = f"{improvement:+.4f}"
+            else:
+                improvement_str = "N/A"
+            
+            print(f"{i+1:6d} | {truth_smoothed:16.4f} | {raw_pred:11.4f} | {refit_pred:13.4f} | {raw_gap:7.4f} | {refit_gap:9.4f} | {improvement_str:>11}")
+        
+        print()
+        print("Gap = |Truth - Prediction| (lower is better)")
+        print("Raw Gap: How well raw equations match truth") 
+        print("Refit Gap: How well refit equations match truth")
+        print("Improvement: Raw Gap - Refit Gap (positive = refitting helped)")
+        print()
+        
+        # Calculate average gaps
+        valid_raw_gaps = [abs(Y_test_s[i, 0] - y_pred_raw[i, 0]) for i in range(n_samples) if not np.isnan(y_pred_raw[i, 0])]
+        valid_refit_gaps = [abs(Y_test_s[i, 0] - y_pred_refit[i, 0]) for i in range(n_samples) if not np.isnan(y_pred_refit[i, 0])]
+        
+        if valid_raw_gaps:
+            avg_raw_gap = np.mean(valid_raw_gaps)
+            print(f"📊 Average Raw Equation Gap: {avg_raw_gap:.4f}")
+        if valid_refit_gaps:
+            avg_refit_gap = np.mean(valid_refit_gaps)
+            print(f"📊 Average Refit Equation Gap: {avg_refit_gap:.4f}")
+        
+        # Calculate overall improvement
+        if valid_raw_gaps and valid_refit_gaps:
+            overall_improvement = np.mean(valid_raw_gaps) - np.mean(valid_refit_gaps)
+            print(f"📊 Overall Improvement: {overall_improvement:+.4f}")
+        
+        print()
+        print("💡 EQUATION PERFORMANCE INTERPRETATION:")
+        print("   • If Raw Gap ≈ Refit Gap: Refitting didn't help much")
+        print("   • If Refit Gap < Raw Gap: Refitting improved equation performance")
+        print("   • If all gaps are large: Equations may not capture the underlying pattern well")
     
     # Final faithfulness summary
     print("\n" + "="*70)
