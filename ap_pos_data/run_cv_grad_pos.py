@@ -977,6 +977,9 @@ def extract_gradient_based_equations(model, X_train, Y_train, num_features, num_
     """
     print(f"[GradientBased] Analyzing model gradients to extract learned patterns...")
     
+    # Enable TensorFlow numpy behavior for reshape operations
+    tf.experimental.numpy.experimental_enable_numpy_behavior()
+    
     # 1. Get model predictions on training data
     print(f"[GradientBased] Getting model predictions...")
     model_predictions = model.predict([X_train[:, i].reshape(-1, 1) for i in range(num_features)], verbose=0)
@@ -1000,7 +1003,8 @@ def extract_gradient_based_equations(model, X_train, Y_train, num_features, num_
             with tf.GradientTape() as tape:
                 tape.watch(X_tensor)
                 # Get predictions for this specific output
-                predictions = model.predict([X_tensor[:, i].reshape(-1, 1) for i in range(num_features)], verbose=0)
+                # Use tf.reshape instead of .reshape() for TensorFlow tensors
+                predictions = model.predict([tf.reshape(X_tensor[:, i], [-1, 1]) for i in range(num_features)], verbose=0)
                 if isinstance(predictions, list):
                     output_predictions = predictions[j]
                 else:

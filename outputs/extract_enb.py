@@ -11,8 +11,8 @@ def main():
     # Uncomment the folder_path you want to use and comment out the others
     # folder_path = "JSON_ENB"
     # folder_path = "JSON_ENB_smoothed"
-    # folder_path = "JSON_ENB_scaled"
-    folder_path = "JSON_ENB_shifted"
+    folder_path = "JSON_ENB_scaled"
+    # folder_path = "JSON_ENB_shifted"
     
     # Determine data preprocessing type based on folder path
     if "smoothed" in folder_path:

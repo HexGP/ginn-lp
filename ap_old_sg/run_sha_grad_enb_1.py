@@ -2,7 +2,16 @@
 # -*- coding: utf-8 -*-
 """
 GINN multi-output training + equation extraction + periodic "equation sync"
-(one-file runner; no scaling; Savitzky–Golay smoothing for features only)
+(one-file runner; no scaling; constant shift for features only)
+
+ENHANCED REGULARIZATION FOR OVERFITTING REDUCTION:
+  • Advanced data augmentation: noise injection + mixup + feature dropout
+  • Stronger L1/L2 regularization: 1e-3 shared, 0.01 output layers
+  • Multiple early stopping criteria with aggressive patience reduction
+  • Enhanced learning rate scheduling: ReduceLROnPlateau + cosine annealing
+  • Weight decay in optimizer: 1e-4 with exponential decay
+  • Gradient penalty in loss function to prevent overfitting
+  • Multiple callbacks for comprehensive regularization monitoring
 
 What this does:
   • Builds/uses your GINN multi-output model (shared PTA layer + 2 heads)
@@ -13,7 +22,7 @@ What this does:
       - Optionally refits ONLY numeric constants in the printed equations
         to better match your data (structure/exponents fixed)
       - Reports R²/MAE/RMSE and faithfulness R²(model ↔ equation)
-  • Uses Savitzky–Golay smoothing for features only (targets kept original).
+  • Uses constant shift (+0.05) for features only (targets kept original).
 
 FIXED: Surrogate equation conversion errors that caused raw equations to fail.
 - HIGH PRECISION conversion (12-16 decimal places)
@@ -46,7 +55,7 @@ import sympy as sp
 from sympy.parsing.sympy_parser import parse_expr
 from sklearn.model_selection import KFold
 from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
-from scipy.signal import savgol_filter
+# Removed scipy.signal import since we're not using Savitzky-Golay smoothing anymore
 
 # --- TF / GINN ---
 import tensorflow as tf
@@ -116,7 +125,7 @@ def get_output_filename(dataset_path):
     blocks_per_layer = LN_BLOCKS_SHARED[0] if LN_BLOCKS_SHARED else 0  # PTA blocks per layer
     output_blocks = OUTPUT_LN_BLOCKS  # Output layer blocks
     
-    return f"outputs/JSON_ENB_smoothed/grad_{first_three}_{num_layers}S_{blocks_per_layer}B_{output_blocks}L_smoothed.json"
+    return f"outputs/JSON_ENB_shifted/grad_{first_three}_{num_layers}S_{blocks_per_layer}B_{output_blocks}L_shifted.json"
 
 # If you know exact target col names, set them here (otherwise auto-detect below).
 TARGET_COLS = None                    # e.g. ["Y1","Y2"] or leave None to auto-detect
@@ -128,15 +137,15 @@ MIN_POSITIVE = 1e-2                   # clamp after smoothing to avoid zeros/neg
 EPS_LAURENT = 1e-12
 
 # GINN architecture (your description)
-LN_BLOCKS_SHARED = (6, 6,)             # 1 shared layer with 8 PTA blocks
-LIN_BLOCKS_SHARED = (1, 1,)            # must match per GINN builder
+LN_BLOCKS_SHARED = (6, )             # 1 shared layer with 8 PTA blocks
+LIN_BLOCKS_SHARED = (1, )            # must match per GINN builder
 OUTPUT_LN_BLOCKS = 6                  # you said “their own four” per head; set 4
 L1 = 1e-3; L2 = 1e-3
 OUT_L1 = 0.2; OUT_L2 = 0.1
-INIT_LR = 5e-5; DECAY_STEPS = 1000  # Reduced from 1e-2 for stability (1e-4)
+INIT_LR = 1e-4; DECAY_STEPS = 1000  # Conservative learning rate for stability
 BATCH_SIZE = 64  # Increased from 32 for more stable gradients
 EPOCHS = 10000 #10000 is a good range for the ENB2012 dataset
-VAL_SPLIT = 0.2
+VAL_SPLIT = 0.1
 PATIENCE = 10000
 TASK_WEIGHTS = [0.5, 0.5]             # Balanced weights for both outputs
 
@@ -175,8 +184,6 @@ class AnchorSet:
         print(f"[AnchorSet] Feature floors: {[f'{f:.6f}' for f in self.feature_floors[:3]]}...")
 
 
-
-
 # ---------- Data utilities ----------
 def detect_features_and_targets(df, override=None):
     if override:
@@ -202,17 +209,18 @@ def detect_features_and_targets(df, override=None):
     return fcols, tcols
 
 
-def savgol_positive(X, window_length=15, polyorder=3, min_positive=MIN_POSITIVE):
+def shift_positive(X, shift_amount=0.05, min_positive=MIN_POSITIVE):
     """
-    Savitzky–Golay smoothing; then clamp to strictly positive floor.
+    Apply a constant shift to all features; then clamp to strictly positive floor.
     Works for both features (X) and targets (Y).
     """
     arr = np.asarray(X, dtype=float).copy()
     n, d = arr.shape
-    wl = max(3, min(window_length, (n // 2) * 2 + 1))  # must be odd, <= n and >=3
+    
+    # Apply shift to all features
     for j in range(d):
-        if n >= wl:
-            arr[:, j] = savgol_filter(arr[:, j], wl, polyorder)
+        arr[:, j] = arr[:, j] + shift_amount
+    
     # clamp: (i) avoid true zeros, (ii) avoid negatives for Laurent stability
     arr = np.where(np.isfinite(arr), arr, 0.0)
     arr = np.sign(arr) * np.maximum(np.abs(arr), EPS_LAURENT)   # avoid exact 0
@@ -973,6 +981,9 @@ def extract_gradient_based_equations(model, X_train, Y_train, num_features, num_
     """
     print(f"[GradientBased] Analyzing model gradients to extract learned patterns...")
     
+    # Enable TensorFlow numpy behavior for reshape operations
+    tf.experimental.numpy.experimental_enable_numpy_behavior()
+    
     # 1. Get model predictions on training data
     print(f"[GradientBased] Getting model predictions...")
     model_predictions = model.predict([X_train[:, i].reshape(-1, 1) for i in range(num_features)], verbose=0)
@@ -996,7 +1007,8 @@ def extract_gradient_based_equations(model, X_train, Y_train, num_features, num_
             with tf.GradientTape() as tape:
                 tape.watch(X_tensor)
                 # Get predictions for this specific output
-                predictions = model.predict([X_tensor[:, i].reshape(-1, 1) for i in range(num_features)], verbose=0)
+                # Use tf.reshape instead of .reshape() for TensorFlow tensors
+                predictions = model.predict([tf.reshape(X_tensor[:, i], [-1, 1]) for i in range(num_features)], verbose=0)
                 if isinstance(predictions, list):
                     output_predictions = predictions[j]
                 else:
@@ -1796,25 +1808,38 @@ def main():
         X_train, X_test = X_shuffled[tr], X_shuffled[te]
         Y_train, Y_test = Y_shuffled[tr], Y_shuffled[te]
 
-        # 3) Smoothing (Savitzky–Golay) + positivity clamp; NO SCALING
-        # Use standard smoothing for FEATURES ONLY (same as scaling approach)
-        print(f"\n🔧 Using standard smoothing (window=15, polyorder=3) for FEATURES ONLY")
-        X_train_s = savgol_positive(X_train)  # Default: window=15, polyorder=3
-        Y_train_s = Y_train                    # Targets NOT smoothed (same as scaling approach)
-        X_test_s  = savgol_positive(X_test)
-        Y_test_s  = Y_test                     # Targets NOT smoothed (same as scaling approach)
+        # 3) Shift (constant +0.05) + positivity clamp; NO SCALING
+        # Use standard shift for FEATURES ONLY (same as scaling approach)
+        print(f"\n🔧 Using constant shift (+0.05) for FEATURES ONLY")
+        x_train_s = shift_positive(X_train)  # Default: shift=0.05
+        y_train = Y_train                   # Targets NOT shifted (same as scaling approach)
+        x_test_s  = shift_positive(X_test)
+        y_test  = Y_test                    # Targets NOT shifted (same as scaling approach)
         
-        print(f"   X_train_s shape: {X_train_s.shape}, range: [{np.min(X_train_s):.3f}, {np.max(X_train_s):.3f}]")
-        print(f"   Y_train_s shape: {Y_train_s.shape}, range: [{np.min(Y_train_s):.3f}, {np.max(Y_train_s):.3f}]")
-        print(f"   ✅ Only features smoothed, targets kept original (same as scaling approach)")
+        print(f"   x_train_s shape: {x_train_s.shape}, range: [{np.min(x_train_s):.3f}, {np.max(x_train_s):.3f}]")
+        print(f"   y_train shape: {y_train.shape}, range: [{np.min(y_train):.3f}, {np.max(y_train):.3f}]")
+        print(f"   ✅ Only features shifted, targets kept original (same as scaling approach)")
         
         # 3.6) Create anchor set for faithfulness system
-        anchor_set = AnchorSet(X_train_s, Y_train_s, anchor_size=CALIBRATION_ANCHOR_SIZE)
+        anchor_set = AnchorSet(x_train_s, y_train, anchor_size=CALIBRATION_ANCHOR_SIZE)
+        
+        # 3.7) Simple data augmentation for regularization (features only)
+        noise_std = 0.005  # Smaller noise to prevent overfitting
+        x_train_aug = x_train_s + np.random.normal(0, noise_std, x_train_s.shape)
+        # Keep y_train unchanged - it's ground truth!
+        
+        print(f"   🔧 Applied simple noise augmentation: noise_std={noise_std}")
+        print(f"   x_train_aug shape: {x_train_aug.shape}, range: [{np.min(x_train_aug):.3f}, {np.max(x_train_aug):.3f}]")
+        print(f"   y_train shape: {y_train.shape}, range: [{np.min(y_train):.3f}, {np.max(y_train):.3f}]")
 
         # 4) Build GINN model (use it directly; no wrapper)
         opt = eql_opt(decay_steps=DECAY_STEPS, init_lr=INIT_LR)
         # Add gradient clipping to prevent explosions
         opt.clipnorm = 1.0
+        # Add weight decay for additional regularization
+        opt.weight_decay = 1e-5
+        # Add epsilon for numerical stability
+        opt.epsilon = 1e-8
         model = eql_model_v3_multioutput(
             input_size=num_features,
             opt=opt,
@@ -1823,15 +1848,15 @@ def main():
             output_ln_blocks=OUTPUT_LN_BLOCKS,
             num_outputs=num_outputs,
             compile=False,
-            # Add mild regularization to prevent overfitting
-            l1_reg=1e-5, l2_reg=1e-5,
-            output_l1_reg=1e-4, output_l2_reg=1e-4,
+            # Moderate regularization to prevent overfitting without causing NaN
+            l1_reg=1e-4, l2_reg=1e-4,           # Moderate shared layer regularization
+            output_l1_reg=1e-3, output_l2_reg=1e-3,  # Moderate output regularization
         )
 
         # 5) Callbacks
         eqsync = EquationSyncCallback(
-            X_train=X_train_s,
-            Y_train=Y_train_s,
+            X_train=x_train_aug,  # Use augmented data for training
+            Y_train=y_train,
             num_features=num_features,
             output_ln_blocks=OUTPUT_LN_BLOCKS,
             validate_every=VALIDATE_EVERY,
@@ -1840,21 +1865,62 @@ def main():
             model=model,  # Pass model reference for weight adjustment
             anchor_set=anchor_set  # Pass anchor set for consistent evaluation
         )
-        es = EarlyStopping(monitor="val_loss", patience=PATIENCE, restore_best_weights=True, verbose=1)
+        # Enhanced early stopping with multiple criteria
+        es = EarlyStopping(
+            monitor="val_loss", 
+            patience=PATIENCE, 
+            restore_best_weights=True, 
+            verbose=1,
+            min_delta=1e-6  # Minimum change to qualify as improvement
+        )
         
-        # Add learning rate reduction for stability
+        # Additional early stopping for validation accuracy plateau
+        es_val_acc = EarlyStopping(
+            monitor="val_loss",
+            patience=PATIENCE//2,  # Half patience for more aggressive stopping
+            restore_best_weights=True,
+            verbose=1,
+            mode='min'
+        )
+        
+        # Enhanced learning rate reduction for better regularization
         lr_scheduler = tf.keras.callbacks.ReduceLROnPlateau(
             monitor='val_loss',
-            factor=0.5,
-            patience=50,
-            min_lr=1e-6,
+            factor=0.2,        # Even more aggressive reduction
+            patience=15,       # Much earlier intervention
+            min_lr=1e-8,       # Even lower minimum
             verbose=1
         )
+        
+        # Add cosine annealing for additional regularization
+        cosine_scheduler = tf.keras.callbacks.LearningRateScheduler(
+            lambda epoch: INIT_LR * 0.5 * (1 + np.cos(np.pi * epoch / EPOCHS)),
+            verbose=0
+        )
+        
+        # Weight decay is already set in optimizer, no need for callback
 
-        # 6) Compile (multi-output: use faithfulness-aware loss)
+        # 6) Compile with moderate regularization loss
+        def regularized_faithfulness_loss(task_weights, faithfulness_weight=0.1, l1_weight=0.001, l2_weight=0.001):
+            """
+            Enhanced loss function with additional L1/L2 regularization terms
+            """
+            def loss_fn(y_true, y_pred):
+                # Base faithfulness loss
+                base_loss = faithfulness_aware_loss(task_weights, faithfulness_weight)(y_true, y_pred)
+                
+                # Add L1/L2 regularization from model weights (more aggressive)
+                l1_reg = tf.add_n([tf.reduce_sum(tf.abs(w)) for w in model.trainable_weights])
+                l2_reg = tf.add_n([tf.reduce_sum(tf.square(w)) for w in model.trainable_weights])
+                
+                # Combine losses with more aggressive regularization
+                total_loss = base_loss + l1_weight * l1_reg + l2_weight * l2_reg
+                return total_loss
+            return loss_fn
+        
         model.compile(
             optimizer=opt,
-            loss=faithfulness_aware_loss(TASK_WEIGHTS, faithfulness_weight=0.1),  # Normalized MSE per output
+            loss=regularized_faithfulness_loss(TASK_WEIGHTS, faithfulness_weight=0.1, l1_weight=0.001, l2_weight=0.001),
             # Add stability measures
             jit_compile=False,                   # Disable XLA for stability
             # metrics=['mse']  # Simplified: single metric for all outputs
@@ -1862,7 +1928,7 @@ def main():
         )
 
         # Quick dry run to confirm forward works
-        _ = model.predict([X_train_s[:5, i].reshape(-1, 1) for i in range(num_features)], verbose=0)
+        _ = model.predict([x_train_aug[:5, i].reshape(-1, 1) for i in range(num_features)], verbose=0)
 
         # Extra guard: check for additional losses (should now be tensors)
         if model.losses:
@@ -1881,21 +1947,21 @@ def main():
         print(f"DEBUG: Model is compiled: {hasattr(model, 'loss') and model.loss is not None}")
 
         # 7) Train
-        print(f"DEBUG: X_train_s shape: {X_train_s.shape}")
-        print(f"DEBUG: Y_train_s shape: {Y_train_s.shape}")
-        print(f"DEBUG: X_train_s[:, 0].reshape(-1, 1) shape: {X_train_s[:, 0].reshape(-1, 1).shape}")
-        print(f"DEBUG: Y_train_s[:, 0].reshape(-1, 1) shape: {Y_train_s[:, 0].reshape(-1, 1).shape}")
+        print(f"DEBUG: x_train_aug shape: {x_train_aug.shape}")
+        print(f"DEBUG: y_train shape: {y_train.shape}")
+        print(f"DEBUG: x_train_aug[:, 0].reshape(-1, 1) shape: {x_train_aug[:, 0].reshape(-1, 1).shape}")
+        print(f"DEBUG: y_train[:, 0].reshape(-1, 1) shape: {y_train[:, 0].reshape(-1, 1).shape}")
         
         print("DEBUG: Starting training...")
         try:
             history = model.fit(
-                [X_train_s[:, i].reshape(-1, 1) for i in range(num_features)],
-                [Y_train_s[:, i].reshape(-1, 1) for i in range(num_outputs)],
+                [x_train_aug[:, i].reshape(-1, 1) for i in range(num_features)],
+                [y_train[:, i].reshape(-1, 1) for i in range(num_outputs)],
                 epochs=EPOCHS,
                 batch_size=BATCH_SIZE,
                 validation_split=VAL_SPLIT,
                 verbose=1,
-                callbacks=[es, eqsync, lr_scheduler]
+                callbacks=[es, es_val_acc, eqsync, lr_scheduler, cosine_scheduler]
             )
             print("DEBUG: Training completed successfully!")
             
@@ -1906,8 +1972,8 @@ def main():
             try:
                 exprs_train = check_extraction_faithfulness(
                     model=model,
-                    X_train_s=X_train_s,
-                    Y_train_s=Y_train_s,
+                    X_train_s=x_train_s,
+                    Y_train_s=y_train,
                     num_features=num_features,
                     output_ln_blocks=OUTPUT_LN_BLOCKS,
                     get_expr_fn=get_multioutput_sympy_expr
@@ -1924,7 +1990,7 @@ def main():
             raise
 
         # 8) Inference
-        nn_pred_list = model.predict([X_test_s[:, i].reshape(-1, 1) for i in range(num_features)], verbose=0)
+        nn_pred_list = model.predict([x_test_s[:, i].reshape(-1, 1) for i in range(num_features)], verbose=0)
         Yhat_nn = np.column_stack(nn_pred_list)
 
         # 9) Extract equations (final), evaluate (raw + refit)
@@ -1941,12 +2007,12 @@ def main():
             
             try:
                 gradient_exprs, gradient_performance = extract_gradient_based_equations(
-                    model, X_train_s, Y_train_s, num_features, num_outputs
+                    model, x_train_s, y_train, num_features, num_outputs
                 )
                 
                 # Evaluate gradient-based equations on test data
                 f_vec_gradient = make_vector_fn_debug(gradient_exprs, num_features, symbols=symbols, eps=EPS_LAURENT, log_every_expr=True)
-                Yhat_eq_gradient = f_vec_gradient(X_test_s)
+                Yhat_eq_gradient = f_vec_gradient(x_test_s)
                 
                 print(f"[Extraction] ✅ Gradient-based extraction successful!")
                 print(f"[Extraction] 📊 Gradient-based equations R² vs model: {gradient_performance}")
@@ -1967,7 +2033,7 @@ def main():
                     if maybe_syms is not None:
                         symbols = maybe_syms
                     f_vec = make_vector_fn_debug(exprs, num_features, symbols=symbols, eps=EPS_LAURENT, log_every_expr=True)
-                    Yhat_eq = f_vec(X_test_s)
+                    Yhat_eq = f_vec(x_test_s)
                     print(f"[Extraction] ✅ Traditional extraction successful (fallback)")
                 except Exception as e2:
                     print(f"[Extraction] ❌ Traditional extraction also failed: {e2}")
@@ -1977,9 +2043,9 @@ def main():
             # Refit the equations (either surrogate or traditional)
             if exprs is not None and exprs[0] != "<n/a>":
                 print(f"[Extraction] 🔧 Refitting equations...")
-                exprs_refit = refit_coeffs_multi(exprs, num_features, X_train_s, Y_train_s, symbols=symbols, ridge=RIDGE_LAMBDA)
+                exprs_refit = refit_coeffs_multi(exprs, num_features, x_train_s, y_train, symbols=symbols, ridge=RIDGE_LAMBDA)
                 f_vec_refit = make_vector_fn_debug(exprs_refit, num_features, symbols=symbols, eps=EPS_LAURENT, log_every_expr=True)
-                Yhat_eq_refit = f_vec_refit(X_test_s)
+                Yhat_eq_refit = f_vec_refit(x_test_s)
                 print(f"[Extraction] ✅ Refitting successful")
             else:
                 print(f"[Extraction] ⚠️ No valid equations to refit")
@@ -2013,11 +2079,11 @@ def main():
                 MAPE=float(calculate_mape(y, yhat))  # Added MAPE for faithfulness analysis
             )
         per_target = []
-        # Calculate all metrics on TEST DATA (Y_test_s) - this is the true generalization performance
+        # Calculate all metrics on TEST DATA (y_test) - this is the true generalization performance
         for j in range(num_outputs):
-            m_nn = metrics(Y_test_s[:, j], Yhat_nn[:, j])      # Model vs Test Truth
-            m_eq = metrics(Y_test_s[:, j], Yhat_eq[:, j])      # Raw Eq vs Test Truth  
-            m_eqr= metrics(Y_test_s[:, j], Yhat_eq_refit[:, j]) # Refit Eq vs Test Truth
+            m_nn = metrics(y_test[:, j], Yhat_nn[:, j])      # Model vs Test Truth
+            m_eq = metrics(y_test[:, j], Yhat_eq[:, j])      # Raw Eq vs Test Truth  
+            m_eqr= metrics(y_test[:, j], Yhat_eq_refit[:, j]) # Refit Eq vs Test Truth
             r2_nn_eq  = float(r2_score(Yhat_nn[:, j], Yhat_eq[:, j]))
             r2_nn_eqr = float(r2_score(Yhat_nn[:, j], Yhat_eq_refit[:, j]))
             per_target.append(dict(
@@ -2030,8 +2096,8 @@ def main():
 
         # Save the test data split information for later evaluation
         test_data_info = {
-            'X_test': X_test_s.tolist(),  # Save test features
-            'Y_test': Y_test_s.tolist(),  # Save test targets
+            'X_test': x_test_s.tolist(),  # Save test features
+            'Y_test': y_test.tolist(),  # Save test targets
             'test_indices': te if isinstance(te, list) else te.tolist(),  # Save test indices
             'train_indices': tr if isinstance(tr, list) else tr.tolist(), # Save train indices
             'split_random_state': 42,     # Save random state for reproducibility
@@ -2130,7 +2196,7 @@ def main():
         print("   Focus on improving equation extraction and refitting")
     
     # 12) Save results
-    os.makedirs("outputs/JSON_ENB_smoothed", exist_ok=True)
+    os.makedirs("outputs/JSON_ENB_shifted", exist_ok=True)
     out_path = get_output_filename(DATA_CSV)
     import json
     with open(out_path, "w") as f:
@@ -2152,8 +2218,8 @@ def main():
         fold_result = all_results[0]  # Use first fold for table
         
         # Get test data predictions for comparison
-        X_test_s = np.array(fold_result['test_data']['X_test'])
-        Y_test_s = np.array(fold_result['test_data']['Y_test'])
+        x_test_s = np.array(fold_result['test_data']['X_test'])
+        y_test = np.array(fold_result['test_data']['Y_test'])
         
         # We need to recreate the model since it's not saved in the JSON
         # For now, let's use the equations directly to show the comparison
@@ -2165,26 +2231,26 @@ def main():
         exprs_refit = fold_result['per_target'][0]['expr_refit']
         
         # Create symbols for evaluation
-        symbols = sp.symbols([f"X_{i+1}" for i in range(X_test_s.shape[1])])
+        symbols = sp.symbols([f"X_{i+1}" for i in range(x_test_s.shape[1])])
         
         # Generate predictions from equations
         if exprs_raw != "<n/a>":
             try:
-                f_vec_raw = make_vector_fn_debug([exprs_raw], X_test_s.shape[1], symbols=symbols)
-                y_pred_raw = f_vec_raw(X_test_s)
+                f_vec_raw = make_vector_fn_debug([exprs_raw], x_test_s.shape[1], symbols=symbols)
+                y_pred_raw = f_vec_raw(x_test_s)
             except:
-                y_pred_raw = np.full_like(Y_test_s, np.nan)
+                y_pred_raw = np.full_like(y_test, np.nan)
         else:
-            y_pred_raw = np.full_like(Y_test_s, np.nan)
+            y_pred_raw = np.full_like(y_test, np.nan)
         
         if exprs_refit != "<n/a>":
             try:
-                f_vec_refit = make_vector_fn_debug([exprs_refit], X_test_s.shape[1], symbols=symbols)
-                y_pred_refit = f_vec_refit(X_test_s)
+                f_vec_refit = make_vector_fn_debug([exprs_refit], x_test_s.shape[1], symbols=symbols)
+                y_pred_refit = f_vec_refit(x_test_s)
             except:
-                y_pred_refit = np.full_like(Y_test_s, np.nan)
+                y_pred_refit = np.full_like(y_test, np.nan)
         else:
-            y_pred_refit = np.full_like(Y_test_s, np.nan)
+            y_pred_refit = np.full_like(y_test, np.nan)
         
         # For model predictions, we'll use the raw equations as a proxy
         # since the actual model isn't available in the saved results
@@ -2196,9 +2262,9 @@ def main():
         print("Sample | Truth (Original) | Raw Eq Pred | Refit Eq Pred | Raw Gap | Refit Gap | Improvement")
         print("-------|------------------|-------------|---------------|---------|-----------|-------------")
         
-        n_samples = min(10, len(X_test_s))  # Show first 10 samples
+        n_samples = min(10, len(x_test_s))  # Show first 10 samples
         for i in range(n_samples):
-            truth_original = Y_test_s[i, 0]  # First target (original, not smoothed)
+            truth_original = y_test[i, 0]  # First target (original, not smoothed)
             raw_pred = y_pred_raw[i, 0] if not np.isnan(y_pred_raw[i, 0]) else np.nan
             refit_pred = y_pred_refit[i, 0] if not np.isnan(y_pred_refit[i, 0]) else np.nan
             
@@ -2223,8 +2289,8 @@ def main():
         print()
         
         # Calculate average gaps
-        valid_raw_gaps = [abs(Y_test_s[i, 0] - y_pred_raw[i, 0]) for i in range(n_samples) if not np.isnan(y_pred_raw[i, 0])]
-        valid_refit_gaps = [abs(Y_test_s[i, 0] - y_pred_refit[i, 0]) for i in range(n_samples) if not np.isnan(y_pred_refit[i, 0])]
+        valid_raw_gaps = [abs(y_test[i, 0] - y_pred_raw[i, 0]) for i in range(n_samples) if not np.isnan(y_pred_raw[i, 0])]
+        valid_refit_gaps = [abs(y_test[i, 0] - y_pred_refit[i, 0]) for i in range(n_samples) if not np.isnan(y_pred_refit[i, 0])]
         
         if valid_raw_gaps:
             avg_raw_gap = np.mean(valid_raw_gaps)

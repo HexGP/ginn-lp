@@ -102,7 +102,7 @@ def get_output_filename(dataset_path):
     blocks_per_layer = LN_BLOCKS_SHARED[0] if LN_BLOCKS_SHARED else 0  # PTA blocks per layer
     output_blocks = OUTPUT_LN_BLOCKS  # Output layer blocks
     
-    return f"outputs/JSON_ENB_shifted/surr_{first_three}_{num_layers}S_{blocks_per_layer}B_{output_blocks}L_shifted.json"
+    return f"outputs/JSON_ENB_shifted/trad_{first_three}_{num_layers}S_{blocks_per_layer}B_{output_blocks}L_shifted.json"
 
 # If you know exact target col names, set them here (otherwise auto-detect below).
 TARGET_COLS = None                    # e.g. ["Y1","Y2"] or leave None to auto-detect
@@ -116,12 +116,12 @@ EPS_LAURENT = 1e-12
 # GINN architecture (your description)
 LN_BLOCKS_SHARED = (6, )             # 1 shared layer with 8 PTA blocks
 LIN_BLOCKS_SHARED = (1, )            # must match per GINN builder
-OUTPUT_LN_BLOCKS = 6                   # you said “their own four” per head; set 4
+OUTPUT_LN_BLOCKS = 6                  # you said “their own four” per head; set 4
 L1 = 1e-3; L2 = 1e-3
 OUT_L1 = 0.2; OUT_L2 = 0.1
 INIT_LR = 5e-5; DECAY_STEPS = 1000  # Reduced from 1e-2 for stability (1e-4)
 BATCH_SIZE = 64  # Increased from 32 for more stable gradients
-EPOCHS = 10000 #10000 is a good range for the ENB2012 dataset
+EPOCHS = 10000
 VAL_SPLIT = 0.2
 PATIENCE = 10000
 TASK_WEIGHTS = [0.5, 0.5]             # Balanced weights for both outputs
@@ -741,192 +741,6 @@ def nudge_head_weights_toward_refit(model, head_idx, X_anchor, Y_anchor, exprs_r
         print(f"[Nudge] Failed to nudge head {head_idx}: {e}")
         return False
 
-# ---------- End-to-End Equation Extraction (Surrogate Approach) ----------
-def extract_end_to_end_equations(model, X_train, Y_train, num_features, num_outputs):
-    """
-    Extract equations by training surrogate models that mimic the full network behavior.
-    This approach ensures equations match the model's performance by learning the complete
-    input-output relationship, not just partial network components.
-    """
-    print(f"[EndToEnd] Training surrogate models to mimic full network behavior...")
-    
-    # 1. Get model predictions on training data (this is what we want to mimic)
-    print(f"[EndToEnd] Getting model predictions...")
-    model_predictions = model.predict([X_train[:, i].reshape(-1, 1) for i in range(num_features)], verbose=0)
-    Yhat_model = np.column_stack(model_predictions)
-    print(f"[EndToEnd] Model predictions shape: {Yhat_model.shape}")
-    
-    # 2. Train surrogate models for each output
-    surrogate_equations = []
-    surrogate_performance = []
-    
-    for j in range(num_outputs):
-        print(f"[EndToEnd] Training surrogate for output {j}...")
-        
-        # Use polynomial features + ridge regression to mimic the network
-        from sklearn.preprocessing import PolynomialFeatures
-        from sklearn.linear_model import Ridge
-        
-        # Start with degree 2, increase if needed
-        max_degree = 4
-        best_r2 = -np.inf
-        best_surrogate = None
-        best_degree = 2
-        
-        for degree in range(2, max_degree + 1):
-            try:
-                poly = PolynomialFeatures(degree=degree, include_bias=False)
-                X_poly = poly.fit_transform(X_train)
-                
-                # Use cross-validation to find optimal alpha
-                from sklearn.linear_model import RidgeCV
-                alphas = [1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1.0]
-                ridge = RidgeCV(alphas=alphas, cv=3)
-                ridge.fit(X_poly, Yhat_model[:, j])
-                
-                # Evaluate performance
-                y_pred_surrogate = ridge.predict(X_poly)
-                r2_score_val = r2_score(Yhat_model[:, j], y_pred_surrogate)
-                
-                print(f"[EndToEnd] Output {j}, Degree {degree}: R² = {r2_score_val:.6f}")
-                
-                if r2_score_val > best_r2:
-                    best_r2 = r2_score_val
-                    best_surrogate = ridge
-                    best_degree = best_degree
-                    
-            except Exception as e:
-                print(f"[EndToEnd] Output {j}, Degree {degree} failed: {e}")
-                continue
-        
-        if best_surrogate is None:
-            print(f"[EndToEnd] ⚠️ Failed to train surrogate for output {j}, using fallback")
-            # Fallback: simple linear model
-            from sklearn.linear_model import LinearRegression
-            best_surrogate = LinearRegression()
-            best_surrogate.fit(X_train, Yhat_model[:, j])
-            best_r2 = r2_score(Yhat_model[:, j], best_surrogate.predict(X_train))
-        
-        # 3. Convert to SymPy expression
-        expr = convert_surrogate_to_sympy(best_surrogate, X_train, num_features, best_degree)
-        surrogate_equations.append(expr)
-        surrogate_performance.append(best_r2)
-        
-        print(f"[EndToEnd] Output {j}: Surrogate R² = {best_r2:.6f}")
-    
-    print(f"[EndToEnd] Surrogate training complete. Average R²: {np.mean(surrogate_performance):.6f}")
-    return surrogate_equations, surrogate_performance
-
-def convert_surrogate_to_sympy(surrogate_model, X_train, num_features, degree):
-    """
-    Convert trained surrogate model to SymPy expression.
-    Handles both polynomial and linear models.
-    """
-    try:
-        if hasattr(surrogate_model, 'coef_') and hasattr(surrogate_model, 'intercept_'):
-            # Linear or polynomial model
-            if degree == 1:
-                # Linear model: y = ax + b
-                coefs = surrogate_model.coef_
-                intercept = surrogate_model.intercept_
-                
-                # Create linear expression
-                terms = []
-                for i in range(num_features):
-                    if abs(coefs[i]) > 1e-10:
-                        terms.append(f"{coefs[i]:.6f}*X_{i+1}")
-                
-                if abs(intercept) > 1e-10:
-                    terms.append(f"{intercept:.6f}")
-                
-                if not terms:
-                    return sp.sympify("0")
-                
-                expr_str = " + ".join(terms)
-                return sp.sympify(expr_str)
-            
-            else:
-                # Polynomial model - convert actual coefficients to equation
-                print(f"[EndToEnd] Converting polynomial model (degree {degree}) to equation...")
-                
-                # Get polynomial features to understand the structure
-                from sklearn.preprocessing import PolynomialFeatures
-                poly = PolynomialFeatures(degree=degree, include_bias=False)
-                X_poly = poly.fit_transform(X_train)
-                
-                # Get feature names for polynomial terms
-                feature_names = poly.get_feature_names_out()
-                print(f"[EndToEnd] Polynomial features: {len(feature_names)} terms")
-                
-                # Get coefficients from the model
-                coefs = surrogate_model.coef_
-                intercept = surrogate_model.intercept_
-                
-                # Build the polynomial expression
-                terms = []
-                
-                # Add intercept if significant
-                if abs(intercept) > 1e-10:
-                    terms.append(f"{intercept:.6f}")
-                
-                # Add polynomial terms
-                for i, (coef, feature_name) in enumerate(zip(coefs, feature_names)):
-                    if abs(coef) > 1e-10:  # Only include significant terms
-                        # Convert sklearn feature names to SymPy format
-                        # e.g., "x0 x1" -> "X_1*X_2", "x0^2" -> "X_1**2"
-                        sympy_feature = convert_sklearn_feature_to_sympy(feature_name, num_features)
-                        terms.append(f"{coef:.6f}*{sympy_feature}")
-                
-                if not terms:
-                    print(f"[EndToEnd] Warning: No significant terms found, using fallback")
-                    return sp.sympify("0")
-                
-                # Create the expression
-                expr_str = " + ".join(terms)
-                print(f"[EndToEnd] Created polynomial expression with {len(terms)} terms")
-                return sp.sympify(expr_str)
-        
-        else:
-            # Fallback for other model types
-            print(f"[EndToEnd] Warning: Model doesn't have coef_ attribute, using fallback")
-            return sp.sympify("surrogate_model_output")
-            
-    except Exception as e:
-        print(f"[EndToEnd] Error converting surrogate to SymPy: {e}")
-        import traceback
-        traceback.print_exc()
-        return sp.sympify("conversion_error")
-
-def convert_sklearn_feature_to_sympy(feature_name, num_features):
-    """
-    Convert sklearn polynomial feature names to SymPy format.
-    
-    Examples:
-    "x0" -> "X_1"
-    "x0^2" -> "X_1**2" 
-    "x0 x1" -> "X_1*X_2"
-    "x0^2 x1" -> "X_1**2*X_2"
-    """
-    try:
-        # Replace sklearn format with SymPy format
-        sympy_expr = feature_name
-        
-        # Replace x0, x1, x2, etc. with X_1, X_2, X_3, etc.
-        for i in range(num_features):
-            sympy_expr = sympy_expr.replace(f"x{i}", f"X_{i+1}")
-        
-        # Replace spaces with multiplication
-        sympy_expr = sympy_expr.replace(" ", "*")
-        
-        # Replace ^ with ** for exponentiation
-        sympy_expr = sympy_expr.replace("^", "**")
-        
-        return sympy_expr
-        
-    except Exception as e:
-        print(f"[EndToEnd] Error converting feature name '{feature_name}': {e}")
-        return feature_name  # Return original if conversion fails
-
 # ---------- Extraction faithfulness check ----------
 def assert_head_layers_exist(model, head_idx, out_ln_blocks):
     expected = [f"out{head_idx}_ln_{i}" for i in range(out_ln_blocks)]
@@ -1000,33 +814,9 @@ class EquationSyncCallback(Callback):
 
         try:
             # 1) Extract equations (power form)
-            print(f"[EqSync] 🎯 Attempting surrogate extraction for maximum faithfulness...")
-            exprs = None
-            
-            try:
-                # PRIORITY: Surrogate extraction
-                exprs, surrogate_performance = extract_end_to_end_equations(
-                    self.model, self.Xt, self.Yt, self.nf, self.Yt.shape[1]
-                )
-                symbols = sp.symbols([f"X_{i+1}" for i in range(self.nf)])
-                print(f"[EqSync] ✅ Surrogate extraction successful: R² = {surrogate_performance}")
-                print(f"[EqSync] 🎯 Using surrogate equations for high faithfulness")
-                
-            except Exception as e:
-                print(f"[EqSync] ❌ Surrogate extraction failed: {e}")
-                print(f"[EqSync] 🔄 Falling back to traditional extraction...")
-                
-                # FALLBACK: Traditional GINN extraction
-                try:
-                    power_equations = get_multioutput_sympy_expr(self.model, self.nf, self.out_ln, round_digits=self.round_digits)
-                    exprs, maybe_syms = normalize_expr_list(power_equations)
-                    symbols = maybe_syms if isinstance(maybe_syms, (list, tuple)) and len(maybe_syms) else sp.symbols([f"X_{i+1}" for i in range(self.nf)])
-                    print(f"[EqSync] ✅ Traditional extraction successful (fallback)")
-                except Exception as e2:
-                    print(f"[EqSync] ❌ Traditional extraction also failed: {e2}")
-                    # Last resort: create dummy expressions
-                    exprs = ["<n/a>"] * self.Yt.shape[1]
-                    symbols = sp.symbols([f"X_{i+1}" for i in range(self.nf)])
+            power_equations = get_multioutput_sympy_expr(self.model, self.nf, self.out_ln, round_digits=self.round_digits)
+            exprs, maybe_syms = normalize_expr_list(power_equations)
+            symbols = maybe_syms if isinstance(maybe_syms, (list, tuple)) and len(maybe_syms) else sp.symbols([f"X_{i+1}" for i in range(self.nf)])
 
             # 2) Evaluate equations on TRAIN
             f_vec = make_vector_fn_debug(exprs, self.nf, symbols=symbols, eps=EPS_LAURENT, log_every_expr=True)
@@ -1227,15 +1017,9 @@ class FaithfulnessTrainingWrapper:
 
 
 # ================== MAIN ==================
-# ENGINEERING PLAN - FAITHFULNESS SYSTEM + SURROGATE EXTRACTION
+# ENGINEERING PLAN - FAITHFULNESS SYSTEM
 # This script implements a comprehensive faithfulness system that ensures extracted
 # equations actually represent what the model learned. For publication quality:
-#
-# NEW: SURROGATE EXTRACTION APPROACH (PRIORITY SYSTEM)
-# - PRIORITY 1: Surrogate extraction trains polynomial models to mimic the full network
-# - This ensures equations match model performance (R² ≈ 0.99 faithfulness)
-# - PRIORITY 2: Traditional GINN extraction as fallback if surrogate fails
-# - Surrogate approach addresses shared layer complexity in multi-output models
 #
 # PHASES:
 # 1) Normal Training: Standard multitask learning with PTA blocks
@@ -1419,68 +1203,21 @@ def main():
 
         # 9) Extract equations (final), evaluate (raw + refit)
         try:
-            print(f"\n🔍 EXTRACTING EQUATIONS...")
-            
-            # Create symbols for equation evaluation
-            symbols = sp.symbols([f"X_{i+1}" for i in range(num_features)])
-            
-            # PRIORITY 1: End-to-end surrogate extraction (guaranteed faithfulness)
-            print(f"[Extraction] 🎯 Training surrogate models for end-to-end extraction...")
-            exprs = None
-            Yhat_eq = None
-            
-            try:
-                surrogate_exprs, surrogate_performance = extract_end_to_end_equations(
-                    model, X_train_s, Y_train_s, num_features, num_outputs
-                )
-                
-                # Evaluate surrogate equations on test data
-                f_vec_surrogate = make_vector_fn_debug(surrogate_exprs, num_features, symbols=symbols, eps=EPS_LAURENT, log_every_expr=True)
-                Yhat_eq_surrogate = f_vec_surrogate(X_test_s)
-                
-                print(f"[Extraction] ✅ Surrogate extraction successful!")
-                print(f"[Extraction] 📊 Surrogate equations R² vs model: {surrogate_performance}")
-                print(f"[Extraction] 🎯 Using surrogate equations for maximum faithfulness")
-                
-                # Use surrogate equations as the "raw" equations
-                exprs = surrogate_exprs
-                Yhat_eq = Yhat_eq_surrogate
-                
-            except Exception as e:
-                print(f"[Extraction] ❌ Surrogate extraction failed: {e}")
-                print(f"[Extraction] 🔄 Falling back to traditional extraction...")
-                
-                # FALLBACK: Traditional GINN extraction
-                try:
-                    power_equations = get_multioutput_sympy_expr(model, num_features, OUTPUT_LN_BLOCKS, round_digits=ROUND_DIGITS)
-                    exprs, maybe_syms = normalize_expr_list(power_equations)
-                    if maybe_syms is not None:
-                        symbols = maybe_syms
-                    f_vec = make_vector_fn_debug(exprs, num_features, symbols=symbols, eps=EPS_LAURENT, log_every_expr=True)
-                    Yhat_eq = f_vec(X_test_s)
-                    print(f"[Extraction] ✅ Traditional extraction successful (fallback)")
-                except Exception as e2:
-                    print(f"[Extraction] ❌ Traditional extraction also failed: {e2}")
-                    exprs = ["<n/a>"] * num_outputs
-                    Yhat_eq = Yhat_nn.copy()
-            
-            # Refit the equations (either surrogate or traditional)
-            if exprs is not None and exprs[0] != "<n/a>":
-                print(f"[Extraction] 🔧 Refitting equations...")
-                exprs_refit = refit_coeffs_multi(exprs, num_features, X_train_s, Y_train_s, symbols=symbols, ridge=RIDGE_LAMBDA)
-                f_vec_refit = make_vector_fn_debug(exprs_refit, num_features, symbols=symbols, eps=EPS_LAURENT, log_every_expr=True)
-                Yhat_eq_refit = f_vec_refit(X_test_s)
-                print(f"[Extraction] ✅ Refitting successful")
-            else:
-                print(f"[Extraction] ⚠️ No valid equations to refit")
-                exprs_refit = ["<n/a>"] * num_outputs
-                Yhat_eq_refit = Yhat_nn.copy()
-                
+            power_equations = get_multioutput_sympy_expr(model, num_features, OUTPUT_LN_BLOCKS, round_digits=ROUND_DIGITS)
+            exprs, maybe_syms = normalize_expr_list(power_equations)
+            symbols = (maybe_syms if isinstance(maybe_syms, (list, tuple)) and len(maybe_syms)
+                       else sp.symbols([f"X_{i+1}" for i in range(num_features)]))
+            f_vec = make_vector_fn_debug(exprs, num_features, symbols=symbols, eps=EPS_LAURENT, log_every_expr=True)
+            Yhat_eq = f_vec(X_test_s)
+
+            exprs_refit = refit_coeffs_multi(exprs, num_features, X_train_s, Y_train_s, symbols=symbols, ridge=RIDGE_LAMBDA)
+            f_vec_refit = make_vector_fn_debug(exprs_refit, num_features, symbols=symbols, eps=EPS_LAURENT, log_every_expr=True)
+            Yhat_eq_refit = f_vec_refit(X_test_s)
         except Exception as e:
             print(f"[Fold {fold}] Equation evaluation failed: {e}")
             Yhat_eq = Yhat_nn.copy()
             Yhat_eq_refit = Yhat_nn.copy()
-            exprs, exprs_refit = ["<n/a>"] * num_outputs, ["<n/a>"] * num_outputs
+            exprs, exprs_refit = ["<n/a>","<n/a>"], ["<n/a>","<n/a>"]
 
         # 10) Metrics (including MAPE for faithfulness analysis)
         # NOTE: All metrics below are calculated on TEST DATA (unseen during training)
@@ -1547,25 +1284,26 @@ def main():
             print(f"\n🔍 {r['target']}:")
             print(f"   📊 Model Performance (vs Truth):")
             print(f"      R²: {r['model']['R2']:.4f} | MAE: {r['model']['MAE']:.4f} | MSE: {r['model']['MSE']:.4f} | RMSE: {r['model']['RMSE']:.4f} | MAPE: {r['model']['MAPE']:.2f}%")
-            print(f"   📝 Raw Equation Performance (vs Truth):")
-            print(f"      R²: {r['eq']['R2']:.4f} | MAE: {r['eq']['MAE']:.4f} | MSE: {r['eq']['MSE']:.4f} | RMSE: {r['eq']['RMSE']:.4f} | MAPE: {r['eq']['MAPE']:.2f}%")
+            # print(f"   📝 Raw Equation Performance (vs Truth):")
+            # print(f"      R²: {r['eq']['R2']:.4f} | MAE: {r['eq']['MAE']:.4f} | MSE: {r['eq']['MSE']:.4f} | RMSE: {r['eq']['RMSE']:.4f} | MAPE: {r['eq']['MAPE']:.2f}%")
             print(f"   🔧 Refit Equation Performance (vs Truth):")
             print(f"      R²: {r['eq_refit']['R2']:.4f} | MAE: {r['eq_refit']['MAE']:.4f} | MSE: {r['eq_refit']['MSE']:.4f} | RMSE: {r['eq_refit']['RMSE']:.4f} | MAPE: {r['eq_refit']['MAPE']:.2f}%")
             print(f"   🎯 FAITHFULNESS (Model ↔ Equation):")
-            print(f"      Raw: R²={r['R2_model_eq']:.4f} | Refit: R²={r['R2_model_eq_refit']:.4f}")
+            # print(f"      Raw: R²={r['R2_model_eq']:.4f} | Refit: R²={r['R2_model_eq_refit']:.4f}")
+            print(f"      Refit: R²={r['R2_model_eq_refit']:.4f}")
             
             # Faithfulness assessment
             faithfulness_raw = r['R2_model_eq']
             faithfulness_refit = r['R2_model_eq_refit']
             
-            if faithfulness_raw >= 0.9:
-                print(f"      ✅ Raw Equation: EXCELLENT Faithfulness (≥0.9)")
-            elif faithfulness_raw >= 0.7:
-                print(f"      🟡 Raw Equation: GOOD Faithfulness (≥0.7)")
-            elif faithfulness_raw >= 0.5:
-                print(f"      🟠 Raw Equation: MODERATE Faithfulness (≥0.5)")
-            else:
-                print(f"      🔴 Raw Equation: POOR Faithfulness (<0.5)")
+            # if faithfulness_raw >= 0.9:
+            #     print(f"      ✅ Raw Equation: EXCELLENT Faithfulness (≥0.9)")
+            # elif faithfulness_raw >= 0.7:
+            #     print(f"      🟡 Raw Equation: GOOD Faithfulness (≥0.7)")
+            # elif faithfulness_raw >= 0.5:
+            #         print(f"      🟠 Raw Equation: MODERATE Faithfulness (≥0.5)")
+            # else:
+            #     print(f"      🔴 Raw Equation: POOR Faithfulness (<0.5)")
                 
             if faithfulness_refit >= 0.9:
                 print(f"      ✅ Refit Equation: EXCELLENT Faithfulness (≥0.9)")
@@ -1683,18 +1421,18 @@ def main():
         # Raw and refit predictions are already generated above
         
         # Print comparison table
-        print("Sample | Truth (Smoothed) | Raw Eq Pred | Refit Eq Pred | Raw Gap | Refit Gap | Improvement")
+        print("Sample | Truth (Original) | Raw Eq Pred | Refit Eq Pred | Raw Gap | Refit Gap | Improvement")
         print("-------|------------------|-------------|---------------|---------|-----------|-------------")
         
-        n_samples = min(10, len(X_test_s))  # Show first 10 samples
+        n_samples = min(10, len(x_test_s))  # Show first 10 samples
         for i in range(n_samples):
-            truth_smoothed = Y_test_s[i, 0]  # First target
+            truth = y_test[i, 0]  # First target
             raw_pred = y_pred_raw[i, 0] if not np.isnan(y_pred_raw[i, 0]) else np.nan
             refit_pred = y_pred_refit[i, 0] if not np.isnan(y_pred_refit[i, 0]) else np.nan
             
             # Calculate gaps (absolute differences)
-            raw_gap = abs(truth_smoothed - raw_pred) if not np.isnan(raw_pred) else np.nan
-            refit_gap = abs(truth_smoothed - refit_pred) if not np.isnan(refit_pred) else np.nan
+            raw_gap = abs(truth - raw_pred) if not np.isnan(raw_pred) else np.nan
+            refit_gap = abs(truth - refit_pred) if not np.isnan(refit_pred) else np.nan
             
             # Calculate improvement
             if not np.isnan(raw_gap) and not np.isnan(refit_gap):
@@ -1703,7 +1441,7 @@ def main():
             else:
                 improvement_str = "N/A"
             
-            print(f"{i+1:6d} | {truth_smoothed:16.4f} | {raw_pred:11.4f} | {refit_pred:13.4f} | {raw_gap:7.4f} | {refit_gap:9.4f} | {improvement_str:>11}")
+            print(f"{i+1:6d} | {truth:16.4f} | {raw_pred:11.4f} | {refit_pred:13.4f} | {raw_gap:7.4f} | {refit_gap:9.4f} | {improvement_str:>11}")
         
         print()
         print("Gap = |Truth - Prediction| (lower is better)")

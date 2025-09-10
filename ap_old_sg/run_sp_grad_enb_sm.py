@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 GINN multi-output training + equation extraction + periodic "equation sync"
-(one-file runner; MinMaxScaler to range (0.1, 10) for positive values)
+(one-file runner; no scaling; Savitzky–Golay smoothing for features only)
 
 What this does:
   • Builds/uses your GINN multi-output model (shared PTA layer + 2 heads)
@@ -11,9 +11,9 @@ What this does:
       - Extracts SymPy equations for y1,y2 (flattens weird nested returns)
       - Evaluates them safely (Laurent terms, no zeros/negatives explode)
       - Optionally refits ONLY numeric constants in the printed equations
-        to better match your (scaled) data (structure/exponents fixed)
+        to better match your data (structure/exponents fixed)
       - Reports R²/MAE/RMSE and faithfulness R²(model ↔ equation)
-  • Uses MinMaxScaler to range (0.1, 10) for positive values only.
+  • Uses Savitzky–Golay smoothing for features only (targets kept original).
 
 FIXED: Surrogate equation conversion errors that caused raw equations to fail.
 - HIGH PRECISION conversion (12-16 decimal places)
@@ -103,7 +103,7 @@ else:
 # --- END: GPU Memory Limits ---
 
 # =============== USER CONFIG ===============
-DATA_CSV = "data/syn_reg.csv"   # <--- change to your dataset file
+DATA_CSV = "data/ENB2012_data.csv"   # <--- change to your dataset file
 
 # Auto-generate output filename based on dataset name and architecture
 def get_output_filename(dataset_path):
@@ -116,7 +116,7 @@ def get_output_filename(dataset_path):
     blocks_per_layer = LN_BLOCKS_SHARED[0] if LN_BLOCKS_SHARED else 0  # PTA blocks per layer
     output_blocks = OUTPUT_LN_BLOCKS  # Output layer blocks
     
-    return f"outputs/JSON_SYN/grad_{first_three}_{num_layers}S_{blocks_per_layer}B_{output_blocks}L.json"
+    return f"outputs/JSON_ENB_smoothed/grad_{first_three}_{num_layers}S_{blocks_per_layer}B_{output_blocks}L_smoothed.json"
 
 # If you know exact target col names, set them here (otherwise auto-detect below).
 TARGET_COLS = None                    # e.g. ["Y1","Y2"] or leave None to auto-detect
@@ -128,9 +128,9 @@ MIN_POSITIVE = 1e-2                   # clamp after smoothing to avoid zeros/neg
 EPS_LAURENT = 1e-12
 
 # GINN architecture (your description)
-LN_BLOCKS_SHARED = (4,)             # 1 shared layer with 8 PTA blocks
-LIN_BLOCKS_SHARED = (1,)            # must match per GINN builder
-OUTPUT_LN_BLOCKS = 4                  # you said “their own four” per head; set 4
+LN_BLOCKS_SHARED = (6, 6,)             # 1 shared layer with 8 PTA blocks
+LIN_BLOCKS_SHARED = (1, 1,)            # must match per GINN builder
+OUTPUT_LN_BLOCKS = 6                  # you said “their own four” per head; set 4
 L1 = 1e-3; L2 = 1e-3
 OUT_L1 = 0.2; OUT_L2 = 0.1
 INIT_LR = 5e-5; DECAY_STEPS = 1000  # Reduced from 1e-2 for stability (1e-4)
@@ -202,26 +202,22 @@ def detect_features_and_targets(df, override=None):
     return fcols, tcols
 
 
-def minmax_scale_positive(X, feature_range=(0.1, 10)):
+def savgol_positive(X, window_length=15, polyorder=3, min_positive=MIN_POSITIVE):
     """
-    MinMaxScaler to range (0.1, 10) for positive values only.
+    Savitzky–Golay smoothing; then clamp to strictly positive floor.
     Works for both features (X) and targets (Y).
     """
-    from sklearn.preprocessing import MinMaxScaler
-    
     arr = np.asarray(X, dtype=float).copy()
-    
-    # Handle any non-finite values
+    n, d = arr.shape
+    wl = max(3, min(window_length, (n // 2) * 2 + 1))  # must be odd, <= n and >=3
+    for j in range(d):
+        if n >= wl:
+            arr[:, j] = savgol_filter(arr[:, j], wl, polyorder)
+    # clamp: (i) avoid true zeros, (ii) avoid negatives for Laurent stability
     arr = np.where(np.isfinite(arr), arr, 0.0)
-    
-    # Apply MinMaxScaler to range (0.1, 10)
-    scaler = MinMaxScaler(feature_range=feature_range)
-    arr_scaled = scaler.fit_transform(arr)
-    
-    # Ensure all values are positive (should already be due to range)
-    arr_scaled = np.maximum(arr_scaled, feature_range[0])
-    
-    return arr_scaled
+    arr = np.sign(arr) * np.maximum(np.abs(arr), EPS_LAURENT)   # avoid exact 0
+    arr = np.maximum(arr, min_positive)                         # enforce positive domain
+    return arr
 
 
 # ---------- SymPy helpers (robust evaluation + coeff refit) ----------
@@ -1772,25 +1768,27 @@ class FaithfulnessTrainingWrapper:
 # - Dynamic loss switching: Normal ↔ Faithfulness based on phase
 # - Automatic phase management: Training stops when criteria met
 def main():
-    # 1) Load data
+    # 1) Load data (same as MTR-enb.ipynb)
     df = pd.read_csv(DATA_CSV)
+    # Drop NULLs (if any) - same as MTR-enb.ipynb
+    df.dropna(inplace=True)
+    
     feature_cols, target_cols = detect_features_and_targets(df, override=TARGET_COLS)
-    X_raw = df[feature_cols].values.astype(np.float32)
-    Y_raw = df[target_cols].values.astype(np.float32)
     num_features = len(feature_cols)
-    num_outputs = Y_raw.shape[1]
+    num_outputs = len(target_cols)
     print(f"Features: {feature_cols}")
     print(f"Targets:  {target_cols}  (num_outputs={num_outputs})")
 
-    # 2) Single fold for debugging faithfulness (or K-fold if K_FOLDS > 1)
-    if K_FOLDS > 1:
-        kf = KFold(n_splits=K_FOLDS, shuffle=True, random_state=42)
-        fold_splits = list(kf.split(X_raw))
-    else:
-        # Single fold: use 80/20 split
-        from sklearn.model_selection import train_test_split
-        tr, te = train_test_split(range(len(X_raw)), test_size=0.2, random_state=42)
-        fold_splits = [(tr, te)]
+    # 2) Apply same split as MTR-enb.ipynb (seed=100, 80/20 split)
+    # First shuffle the data like in MTR-enb.ipynb
+    df_shuffled = df.sample(frac=1.0, random_state=100).reset_index(drop=True)
+    X_shuffled = df_shuffled[feature_cols].values.astype(np.float32)
+    Y_shuffled = df_shuffled[target_cols].values.astype(np.float32)
+    
+    # Single fold: use 80/20 split with same random state as MTR-enb.ipynb
+    from sklearn.model_selection import train_test_split
+    tr, te = train_test_split(range(len(X_shuffled)), test_size=0.2, random_state=100)
+    fold_splits = [(tr, te)]
     
     all_results = []
 
@@ -1799,15 +1797,20 @@ def main():
         print(f"FOLD {fold}/{K_FOLDS}   Train={len(tr)}  Test={len(te)}")
         print("="*70)
 
-        X_train, X_test = X_raw[tr], X_raw[te]
-        Y_train, Y_test = Y_raw[tr], Y_raw[te]
+        X_train, X_test = X_shuffled[tr], X_shuffled[te]
+        Y_train, Y_test = Y_shuffled[tr], Y_shuffled[te]
 
-        # 3) MinMaxScaler to range (0.1, 10) for positive values
-        print(f"\n🔧 Using MinMaxScaler to range (0.1, 10)")
-        X_train_s = minmax_scale_positive(X_train)
-        Y_train_s = minmax_scale_positive(Y_train)
-        X_test_s  = minmax_scale_positive(X_test)
-        Y_test_s  = minmax_scale_positive(Y_test)
+        # 3) Smoothing (Savitzky–Golay) + positivity clamp; NO SCALING
+        # Use standard smoothing for FEATURES ONLY (same as scaling approach)
+        print(f"\n🔧 Using standard smoothing (window=15, polyorder=3) for FEATURES ONLY")
+        X_train_s = savgol_positive(X_train)  # Default: window=15, polyorder=3
+        Y_train_s = Y_train                    # Targets NOT smoothed (same as scaling approach)
+        X_test_s  = savgol_positive(X_test)
+        Y_test_s  = Y_test                     # Targets NOT smoothed (same as scaling approach)
+        
+        print(f"   X_train_s shape: {X_train_s.shape}, range: [{np.min(X_train_s):.3f}, {np.max(X_train_s):.3f}]")
+        print(f"   Y_train_s shape: {Y_train_s.shape}, range: [{np.min(Y_train_s):.3f}, {np.max(Y_train_s):.3f}]")
+        print(f"   ✅ Only features smoothed, targets kept original (same as scaling approach)")
         
         # 3.6) Create anchor set for faithfulness system
         anchor_set = AnchorSet(X_train_s, Y_train_s, anchor_size=CALIBRATION_ANCHOR_SIZE)
@@ -2131,7 +2134,7 @@ def main():
         print("   Focus on improving equation extraction and refitting")
     
     # 12) Save results
-    os.makedirs("outputs/JSON_SYN", exist_ok=True)
+    os.makedirs("outputs/JSON_ENB_smoothed", exist_ok=True)
     out_path = get_output_filename(DATA_CSV)
     import json
     with open(out_path, "w") as f:
@@ -2194,18 +2197,18 @@ def main():
         # Raw and refit predictions are already generated above
         
         # Print comparison table
-        print("Sample | Truth (Scaled) | Raw Eq Pred | Refit Eq Pred | Raw Gap | Refit Gap | Improvement")
+        print("Sample | Truth (Original) | Raw Eq Pred | Refit Eq Pred | Raw Gap | Refit Gap | Improvement")
         print("-------|------------------|-------------|---------------|---------|-----------|-------------")
         
         n_samples = min(10, len(X_test_s))  # Show first 10 samples
         for i in range(n_samples):
-            truth_smoothed = Y_test_s[i, 0]  # First target
+            truth_original = Y_test_s[i, 0]  # First target (original, not smoothed)
             raw_pred = y_pred_raw[i, 0] if not np.isnan(y_pred_raw[i, 0]) else np.nan
             refit_pred = y_pred_refit[i, 0] if not np.isnan(y_pred_refit[i, 0]) else np.nan
             
             # Calculate gaps (absolute differences)
-            raw_gap = abs(truth_smoothed - raw_pred) if not np.isnan(raw_pred) else np.nan
-            refit_gap = abs(truth_smoothed - refit_pred) if not np.isnan(refit_pred) else np.nan
+            raw_gap = abs(truth_original - raw_pred) if not np.isnan(raw_pred) else np.nan
+            refit_gap = abs(truth_original - refit_pred) if not np.isnan(refit_pred) else np.nan
             
             # Calculate improvement
             if not np.isnan(raw_gap) and not np.isnan(refit_gap):
@@ -2214,7 +2217,7 @@ def main():
             else:
                 improvement_str = "N/A"
             
-            print(f"{i+1:6d} | {truth_smoothed:16.4f} | {raw_pred:11.4f} | {refit_pred:13.4f} | {raw_gap:7.4f} | {refit_gap:9.4f} | {improvement_str:>11}")
+            print(f"{i+1:6d} | {truth_original:16.4f} | {raw_pred:11.4f} | {refit_pred:13.4f} | {raw_gap:7.4f} | {refit_gap:9.4f} | {improvement_str:>11}")
         
         print()
         print("Gap = |Truth - Prediction| (lower is better)")
