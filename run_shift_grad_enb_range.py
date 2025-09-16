@@ -4,6 +4,13 @@
 GINN multi-output training + equation extraction + periodic "equation sync"
 (one-file runner; no scaling; constant shift for features only)
 
+RANGE-AWARE TRAINING SYSTEM (NEW APPROACH):
+  • Range-aware loss function that considers input/output data ranges
+  • Scale-sensitive MSE that gives more weight to smaller target values
+  • Range penalty for predictions outside reasonable bounds (15% weight)
+  • Explicit range monitoring and coverage analysis
+  • Designed to reduce MSE/MAPE by being sensitive to actual data scales
+
 ENHANCED REGULARIZATION FOR OVERFITTING REDUCTION:
   • Advanced data augmentation: noise injection + mixup + feature dropout
   • Stronger L1/L2 regularization: 1e-3 shared, 0.01 output layers
@@ -22,7 +29,7 @@ What this does:
       - Optionally refits ONLY numeric constants in the printed equations
         to better match your data (structure/exponents fixed)
       - Reports R²/MAE/RMSE and faithfulness R²(model ↔ equation)
-  • Uses MinMaxScaler [0.1, data_max] for features only (targets kept original).
+  • Uses constant shift (+0.05) for features only (targets kept original).
 
 FIXED: Surrogate equation conversion errors that caused raw equations to fail.
 - HIGH PRECISION conversion (12-16 decimal places)
@@ -56,7 +63,6 @@ from sympy.parsing.sympy_parser import parse_expr
 from sklearn.model_selection import KFold
 from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
 # Removed scipy.signal import since we're not using Savitzky-Golay smoothing anymore
-from sklearn.preprocessing import MinMaxScaler
 
 # --- TF / GINN ---
 import tensorflow as tf
@@ -126,7 +132,7 @@ def get_output_filename(dataset_path):
     blocks_per_layer = LN_BLOCKS_SHARED[0] if LN_BLOCKS_SHARED else 0  # PTA blocks per layer
     output_blocks = OUTPUT_LN_BLOCKS  # Output layer blocks
     
-    return f"outputs/JSON_ENB_scaled/grad_{first_three}_{num_layers}S_{blocks_per_layer}B_{output_blocks}L_scaled_datamax.json"
+    return f"outputs/JSON_ENB_shifted/grad_RANGE_{first_three}_{num_layers}S_{blocks_per_layer}B_{output_blocks}L_shifted.json"
 
 # If you know exact target col names, set them here (otherwise auto-detect below).
 TARGET_COLS = None                    # e.g. ["Y1","Y2"] or leave None to auto-detect
@@ -215,30 +221,23 @@ def detect_features_and_targets(df, override=None):
     return fcols, tcols
 
 
-def scale_features_minmax(X, min_positive=MIN_POSITIVE):
+def shift_positive(X, shift_amount=0.05, min_positive=MIN_POSITIVE):
     """
-    Apply MinMaxScaler to features with data-driven range [0.1, max_value]; then clamp to strictly positive floor.
-    Only works for features (X), not targets (Y).
+    Apply a constant shift to all features; then clamp to strictly positive floor.
+    Works for both features (X) and targets (Y).
     """
     arr = np.asarray(X, dtype=float).copy()
+    n, d = arr.shape
     
-    # Find the maximum value in the data to set appropriate range
-    max_val = np.max(arr)
-    # Use 0.1 as minimum and the ACTUAL maximum as the upper bound
-    target_max = max_val
-    
-    print(f"   📊 Data range: [{np.min(arr):.3f}, {max_val:.3f}]")
-    print(f"   🎯 Scaling to: [0.1, {target_max:.3f}]")
-    
-    # Apply MinMaxScaler to scale features to [0.1, target_max] range
-    scaler = MinMaxScaler(feature_range=(0.1, target_max))
-    arr_scaled = scaler.fit_transform(arr)
+    # Apply shift to all features
+    for j in range(d):
+        arr[:, j] = arr[:, j] + shift_amount
     
     # clamp: (i) avoid true zeros, (ii) avoid negatives for Laurent stability
-    arr_scaled = np.where(np.isfinite(arr_scaled), arr_scaled, 0.0)
-    arr_scaled = np.sign(arr_scaled) * np.maximum(np.abs(arr_scaled), EPS_LAURENT)   # avoid exact 0
-    arr_scaled = np.maximum(arr_scaled, min_positive)                         # enforce positive domain
-    return arr_scaled
+    arr = np.where(np.isfinite(arr), arr, 0.0)
+    arr = np.sign(arr) * np.maximum(np.abs(arr), EPS_LAURENT)   # avoid exact 0
+    arr = np.maximum(arr, min_positive)                         # enforce positive domain
+    return arr
 
 
 # ---------- SymPy helpers (robust evaluation + coeff refit) ----------
@@ -1096,10 +1095,10 @@ def extract_gradient_based_equations(model, X_train, Y_train, num_features, num_
 
 def build_gradient_based_equation(gradients, target_values, num_features, output_idx):
     """
-    Build sophisticated equation from gradient-based feature importance.
-    Uses gradients to determine feature importance and builds polynomial terms.
+    Build COMPREHENSIVE equation from gradient-based feature importance.
+    Uses ALL variables with various powers and interactions based on gradient importance.
     """
-    print(f"[GradientBased] Building sophisticated equation for output {output_idx} from gradients...")
+    print(f"[GradientBased] Building COMPREHENSIVE equation for output {output_idx} from gradients...")
     
     # Normalize gradients to get relative importance
     total_gradient = np.sum(np.abs(gradients))
@@ -1112,50 +1111,100 @@ def build_gradient_based_equation(gradients, target_values, num_features, output
     target_mean = np.mean(target_values)
     target_std = np.std(target_values)
     
-    # Build polynomial equation with gradient-based feature selection
+    print(f"[GradientBased] Using ALL {num_features} features with gradient-based weighting")
+    print(f"[GradientBased] Feature importance: {[f'{i+1}:{g:.3f}' for i, g in enumerate(normalized_gradients)]}")
+    
+    # Build comprehensive polynomial equation
     terms = []
     
-    # Add linear terms based on gradient importance
+    # 1. LINEAR TERMS - Include ALL features (no arbitrary cutoff)
+    print(f"[GradientBased] Adding linear terms for all features...")
     for i in range(num_features):
-        if normalized_gradients[i] > 0.01:  # Only include features with >1% importance
-            # Scale coefficient by gradient importance and target statistics
-            coef = normalized_gradients[i] * target_std * np.sign(gradients[i])
-            if abs(coef) > 1e-6:  # Only include significant coefficients
-                terms.append(f"{coef:.6f}*X_{i+1}")
-                print(f"[GradientBased] Linear term {i+1}: importance={normalized_gradients[i]:.3f}, coef={coef:.6f}")
+        # Scale coefficient by gradient importance and target statistics
+        coef = normalized_gradients[i] * target_std * np.sign(gradients[i])
+        if abs(coef) > 1e-8:  # Very low threshold to include more terms
+            terms.append(f"{coef:.6f}*X_{i+1}")
+            print(f"[GradientBased] Linear term {i+1}: importance={normalized_gradients[i]:.3f}, coef={coef:.6f}")
     
-    # Add quadratic terms for most important features
-    important_features = np.argsort(normalized_gradients)[-3:]  # Top 3 most important
-    for i in important_features:
+    # 2. QUADRATIC TERMS - Include for ALL features
+    print(f"[GradientBased] Adding quadratic terms for all features...")
+    for i in range(num_features):
+        # Add quadratic term with importance-based coefficient
+        coef_quad = normalized_gradients[i] * target_std * 0.1  # 10% of linear coefficient
+        if abs(coef_quad) > 1e-8:
+            terms.append(f"{coef_quad:.6f}*X_{i+1}**2")
+            print(f"[GradientBased] Quadratic term {i+1}: coef={coef_quad:.6f}")
+    
+    # 3. CUBIC TERMS - Include for most important features
+    print(f"[GradientBased] Adding cubic terms for important features...")
+    for i in range(num_features):
+        if normalized_gradients[i] > 0.05:  # Top 50% of features
+            coef_cubic = normalized_gradients[i] * target_std * 0.01  # 1% of linear coefficient
+            if abs(coef_cubic) > 1e-8:
+                terms.append(f"{coef_cubic:.6f}*X_{i+1}**3")
+                print(f"[GradientBased] Cubic term {i+1}: coef={coef_cubic:.6f}")
+    
+    # 4. ALL PAIRWISE INTERACTIONS - Include interactions between ALL feature pairs
+    print(f"[GradientBased] Adding ALL pairwise interactions...")
+    for i in range(num_features):
+        for j in range(i+1, num_features):
+            # Interaction coefficient based on both features' importance
+            coef_interaction = np.sqrt(normalized_gradients[i] * normalized_gradients[j]) * target_std * 0.05
+            if abs(coef_interaction) > 1e-8:
+                terms.append(f"{coef_interaction:.6f}*X_{i+1}*X_{j+1}")
+                print(f"[GradientBased] Interaction term {i+1}*{j+1}: coef={coef_interaction:.6f}")
+    
+    # 5. THREE-WAY INTERACTIONS - Include for most important feature triplets
+    print(f"[GradientBased] Adding three-way interactions...")
+    important_features = np.argsort(normalized_gradients)[-4:]  # Top 4 features
+    for i in range(len(important_features)):
+        for j in range(i+1, len(important_features)):
+            for k in range(j+1, len(important_features)):
+                idx_i, idx_j, idx_k = important_features[i], important_features[j], important_features[k]
+                coef_three_way = (normalized_gradients[idx_i] * normalized_gradients[idx_j] * normalized_gradients[idx_k])**(1/3) * target_std * 0.01
+                if abs(coef_three_way) > 1e-8:
+                    terms.append(f"{coef_three_way:.6f}*X_{idx_i+1}*X_{idx_j+1}*X_{idx_k+1}")
+                    print(f"[GradientBased] Three-way interaction {idx_i+1}*{idx_j+1}*{idx_k+1}: coef={coef_three_way:.6f}")
+    
+    # 6. MIXED POWER TERMS - Include terms like X₁²*X₂, X₁*X₂², etc.
+    print(f"[GradientBased] Adding mixed power terms...")
+    for i in range(num_features):
+        for j in range(num_features):
+            if i != j and normalized_gradients[i] > 0.05 and normalized_gradients[j] > 0.05:
+                # X_i^2 * X_j
+                coef_mixed1 = np.sqrt(normalized_gradients[i] * normalized_gradients[j]) * target_std * 0.02
+                if abs(coef_mixed1) > 1e-8:
+                    terms.append(f"{coef_mixed1:.6f}*X_{i+1}**2*X_{j+1}")
+                    print(f"[GradientBased] Mixed term {i+1}²*{j+1}: coef={coef_mixed1:.6f}")
+                
+                # X_i * X_j^2
+                coef_mixed2 = np.sqrt(normalized_gradients[i] * normalized_gradients[j]) * target_std * 0.02
+                if abs(coef_mixed2) > 1e-8:
+                    terms.append(f"{coef_mixed2:.6f}*X_{i+1}*X_{j+1}**2")
+                    print(f"[GradientBased] Mixed term {i+1}*{j+1}²: coef={coef_mixed2:.6f}")
+    
+    # 7. FOURTH POWER TERMS - Include for most important features
+    print(f"[GradientBased] Adding fourth power terms...")
+    for i in range(num_features):
         if normalized_gradients[i] > 0.1:  # Only for very important features
-            # Add quadratic term with smaller coefficient
-            coef_quad = normalized_gradients[i] * target_std * 0.1  # Smaller coefficient for quadratic
-            if abs(coef_quad) > 1e-6:
-                terms.append(f"{coef_quad:.6f}*X_{i+1}**2")
-                print(f"[GradientBased] Quadratic term {i+1}: coef={coef_quad:.6f}")
-    
-    # Add interaction terms between top 2 most important features
-    if len(important_features) >= 2:
-        i1, i2 = important_features[-2], important_features[-1]
-        if normalized_gradients[i1] > 0.1 and normalized_gradients[i2] > 0.1:
-            # Add interaction term
-            coef_interaction = np.sqrt(normalized_gradients[i1] * normalized_gradients[i2]) * target_std * 0.05
-            if abs(coef_interaction) > 1e-6:
-                terms.append(f"{coef_interaction:.6f}*X_{i1+1}*X_{i2+1}")
-                print(f"[GradientBased] Interaction term {i1+1}*{i2+1}: coef={coef_interaction:.6f}")
+            coef_quartic = normalized_gradients[i] * target_std * 0.001  # 0.1% of linear coefficient
+            if abs(coef_quartic) > 1e-8:
+                terms.append(f"{coef_quartic:.6f}*X_{i+1}**4")
+                print(f"[GradientBased] Quartic term {i+1}: coef={coef_quartic:.6f}")
     
     # Add intercept (target mean)
-    if abs(target_mean) > 1e-6:
+    if abs(target_mean) > 1e-8:
         terms.append(f"{target_mean:.6f}")
         print(f"[GradientBased] Intercept: {target_mean:.6f}")
     
     if not terms:
-        # Fallback: simple linear equation
+        print(f"[GradientBased] ⚠️ No terms generated, using fallback")
         return build_simple_linear_equation(gradients, target_values, num_features, output_idx)
     
-    # Create the expression
+    # Create the comprehensive expression
     expr_str = " + ".join(terms)
-    print(f"[GradientBased] Built sophisticated equation: {expr_str}")
+    print(f"[GradientBased] Built COMPREHENSIVE equation with {len(terms)} terms")
+    print(f"[GradientBased] Equation preview: {expr_str[:200]}...")
     return sp.sympify(expr_str)
 
 def build_simple_linear_equation(gradients, target_values, num_features, output_idx):
@@ -1699,7 +1748,220 @@ class EquationSyncCallback(Callback):
         return self.calibrated_equations
 
 
-# ---------- Loss (weighted multitask MSE with scale normalization) ----------
+# ---------- Range-Aware Loss Functions ----------
+class RangeAwareLoss:
+    """
+    Range-aware loss that considers input and output data ranges to improve training sensitivity.
+    This helps the model learn appropriate scales and reduces MSE/MAPE by being range-conscious.
+    """
+    
+    def __init__(self, input_ranges, output_ranges, range_weight=0.5, distribution_aware=True, target_means=None, target_stds=None):
+        """
+        Initialize range-aware loss with data ranges.
+        
+        Args:
+            input_ranges: List of (min, max) tuples for each input feature
+            output_ranges: List of (min, max) tuples for each output target
+            range_weight: Weight for range penalty term (0.1 = 10% range penalty)
+        """
+        self.input_ranges = input_ranges
+        self.output_ranges = output_ranges
+        self.range_weight = range_weight
+        
+        # Calculate range spans for normalization
+        self.input_spans = [max_val - min_val for min_val, max_val in input_ranges]
+        self.output_spans = [max_val - min_val for min_val, max_val in output_ranges]
+        self.distribution_aware = distribution_aware
+        
+        # Store distribution statistics for adaptive penalties
+        if target_means is not None and target_stds is not None:
+            # Use actual data statistics if provided
+            self.target_means = target_means
+            self.target_stds = target_stds
+        else:
+            # Fallback to approximated statistics
+            self.target_means = [(min_val + max_val) / 2 for min_val, max_val in output_ranges]
+            self.target_stds = [span / 4 for span in self.output_spans]  # Approximate std from range
+        
+        print(f"[RangeAware] Input ranges: {input_ranges}")
+        print(f"[RangeAware] Output ranges: {output_ranges}")
+        print(f"[RangeAware] Range weight: {range_weight}")
+        print(f"[RangeAware] Distribution-aware: {distribution_aware}")
+        print(f"[RangeAware] Target means: {self.target_means}")
+        print(f"[RangeAware] Target stds: {self.target_stds}")
+    
+    def range_penalty_loss(self, y_true, y_pred):
+        """
+        Calculate penalty for predictions outside reasonable ranges.
+        """
+        if isinstance(y_true, (list, tuple)) and isinstance(y_pred, (list, tuple)):
+            total_penalty = tf.constant(0.0, dtype=tf.float32)
+            
+            for i in range(len(y_true)):
+                y_t = y_true[i]
+                y_p = y_pred[i]
+                
+                # Get target range
+                target_min, target_max = self.output_ranges[i]
+                target_span = self.output_spans[i]
+                
+                # Penalty for predictions outside range (with 5% tolerance)
+                tolerance = target_span * 0.05  # 5% tolerance - more aggressive
+                expanded_min = target_min - tolerance
+                expanded_max = target_max + tolerance
+                
+                # Calculate penalties
+                below_penalty = tf.maximum(0.0, expanded_min - y_p)
+                above_penalty = tf.maximum(0.0, y_p - expanded_max)
+                
+                # Make penalty more aggressive - don't normalize by span
+                range_penalty = (below_penalty + above_penalty) * 2.0  # Multiply by 2 for stronger penalty
+                
+                # Average penalty across batch
+                avg_penalty = tf.reduce_mean(range_penalty)
+                total_penalty += avg_penalty
+            
+            return total_penalty
+        else:
+            # Single output case
+            target_min, target_max = self.output_ranges[0]
+            target_span = self.output_spans[0]
+            
+            tolerance = target_span * 0.05
+            expanded_min = target_min - tolerance
+            expanded_max = target_max + tolerance
+            
+            below_penalty = tf.maximum(0.0, expanded_min - y_pred)
+            above_penalty = tf.maximum(0.0, y_pred - expanded_max)
+            
+            range_penalty = (below_penalty + above_penalty) * 2.0  # Stronger penalty
+            return tf.reduce_mean(range_penalty)
+    
+    def distribution_aware_loss(self, y_true, y_pred):
+        """
+        Distribution-aware loss that penalizes predictions based on how far they deviate
+        from the expected distribution patterns in the data.
+        """
+        if isinstance(y_true, (list, tuple)) and isinstance(y_pred, (list, tuple)):
+            total_loss = tf.constant(0.0, dtype=tf.float32)
+            
+            for i in range(len(y_true)):
+                y_t = y_true[i]
+                y_p = y_pred[i]
+                
+                # Get distribution parameters for this target
+                target_mean = self.target_means[i]
+                target_std = self.target_stds[i]
+                
+                # Calculate how far predictions deviate from the distribution
+                # Penalize more heavily if prediction is far from the distribution center
+                mean_deviation = tf.abs(y_p - target_mean)
+                distribution_penalty = mean_deviation / (target_std + 1e-8)
+                
+                # Scale penalty based on how close truth is to distribution center
+                # If truth is near center, be stricter about predictions
+                truth_center_distance = tf.abs(y_t - target_mean) / (target_std + 1e-8)
+                adaptive_weight = tf.where(
+                    truth_center_distance < 1.0,  # If truth is within 1 std of center
+                    2.0,  # Apply stronger penalty
+                    1.0   # Normal penalty
+                )
+                
+                # Apply adaptive penalty
+                final_penalty = distribution_penalty * adaptive_weight
+                total_loss += tf.reduce_mean(final_penalty)
+            
+            return total_loss
+        else:
+            # Single output case
+            target_mean = self.target_means[0]
+            target_std = self.target_stds[0]
+            
+            mean_deviation = tf.abs(y_pred - target_mean)
+            distribution_penalty = mean_deviation / (target_std + 1e-8)
+            
+            truth_center_distance = tf.abs(y_true - target_mean) / (target_std + 1e-8)
+            adaptive_weight = tf.where(
+                truth_center_distance < 1.0,
+                2.0,
+                1.0
+            )
+            
+            final_penalty = distribution_penalty * adaptive_weight
+            return tf.reduce_mean(final_penalty)
+    
+    def scale_sensitive_loss(self, y_true, y_pred):
+        """
+        Scale-sensitive MSE that gives more weight to smaller target values.
+        """
+        if isinstance(y_true, (list, tuple)) and isinstance(y_pred, (list, tuple)):
+            total_loss = tf.constant(0.0, dtype=tf.float32)
+            
+            for i in range(len(y_true)):
+                y_t = y_true[i]
+                y_p = y_pred[i]
+                
+                # Calculate MSE
+                mse = tf.keras.losses.mse(y_t, y_p)
+                
+                # Apply scale-sensitive weighting
+                # Give more weight to smaller values (inverse relationship)
+                target_mean = tf.reduce_mean(tf.abs(y_t))
+                scale_factor = tf.maximum(target_mean / (tf.abs(y_t) + 1e-8), 1.0)
+                
+                # Weight the MSE by scale factor (more weight for smaller values)
+                weighted_mse = mse * tf.reduce_mean(scale_factor)
+                
+                total_loss += weighted_mse
+            
+            return total_loss
+        else:
+            # Single output case
+            mse = tf.keras.losses.mse(y_true, y_pred)
+            
+            # Scale-sensitive weighting
+            target_mean = tf.reduce_mean(tf.abs(y_true))
+            scale_factor = tf.maximum(target_mean / (tf.abs(y_true) + 1e-8), 1.0)
+            
+            weighted_mse = mse * tf.reduce_mean(scale_factor)
+            return weighted_mse
+    
+    def create_range_aware_loss(self, task_weights):
+        """
+        Create a range-aware loss function that combines MSE with range penalties.
+        """
+        def range_aware_loss_fn(y_true, y_pred):
+            # Base MSE loss
+            if isinstance(y_true, (list, tuple)) and isinstance(y_pred, (list, tuple)):
+                base_loss = tf.constant(0.0, dtype=tf.float32)
+                for i in range(len(task_weights)):
+                    # Use scale-sensitive MSE
+                    target_var = tf.math.reduce_variance(y_true[i]) + 1e-8
+                    mse = tf.keras.losses.mse(y_true[i], y_pred[i])
+                    normalized_mse = mse / target_var
+                    base_loss += task_weights[i] * normalized_mse
+            else:
+                base_loss = tf.keras.losses.mse(y_true, y_pred)
+            
+            # Add range penalty
+            range_penalty = self.range_penalty_loss(y_true, y_pred)
+            
+            # Add scale-sensitive component
+            scale_sensitive = self.scale_sensitive_loss(y_true, y_pred)
+            
+            # Add distribution-aware component if enabled
+            distribution_penalty = tf.constant(0.0, dtype=tf.float32)
+            if self.distribution_aware:
+                distribution_penalty = self.distribution_aware_loss(y_true, y_pred)
+            
+            # Combine losses - MUCH MORE AGGRESSIVE range penalty + light distribution awareness
+            total_loss = base_loss + self.range_weight * range_penalty + 0.1 * scale_sensitive + 0.05 * distribution_penalty
+            
+            return total_loss
+        
+        return range_aware_loss_fn
+
+# ---------- Original Loss Functions (for comparison) ----------
 def faithfulness_aware_loss(task_weights, faithfulness_weight=0.0):
     def loss(y_true, y_pred):
         if isinstance(y_true, (list, tuple)) and isinstance(y_pred, (list, tuple)):
@@ -1851,17 +2113,56 @@ def main():
         X_train, X_test = X_shuffled[tr], X_shuffled[te]
         Y_train, Y_test = Y_shuffled[tr], Y_shuffled[te]
 
-        # 3) MinMaxScaler + positivity clamp; NO SCALING
-        # Use MinMaxScaler for FEATURES ONLY (same as scaling approach)
-        print(f"\n🔧 Using MinMaxScaler for FEATURES ONLY")
-        x_train_s = scale_features_minmax(X_train)  # MinMaxScaler to [0.1, data_max] range
-        y_train = Y_train                   # Targets NOT scaled (same as scaling approach)
-        x_test_s  = scale_features_minmax(X_test)
-        y_test  = Y_test                    # Targets NOT scaled (same as scaling approach)
+        # 3) Shift (constant +0.05) + positivity clamp; NO SCALING
+        # Use standard shift for FEATURES ONLY (same as scaling approach)
+        print(f"\n🔧 Using constant shift (+0.05) for FEATURES ONLY")
+        x_train_s = shift_positive(X_train)  # Default: shift=0.05
+        y_train = Y_train                   # Targets NOT shifted (same as scaling approach)
+        x_test_s  = shift_positive(X_test)
+        y_test  = Y_test                    # Targets NOT shifted (same as scaling approach)
         
         print(f"   x_train_s shape: {x_train_s.shape}, range: [{np.min(x_train_s):.3f}, {np.max(x_train_s):.3f}]")
         print(f"   y_train shape: {y_train.shape}, range: [{np.min(y_train):.3f}, {np.max(y_train):.3f}]")
-        print(f"   ✅ Only features scaled, targets kept original (same as scaling approach)")
+        print(f"   ✅ Only features shifted, targets kept original (same as scaling approach)")
+        
+        # 3.5) Calculate data ranges for range-aware training
+        print(f"\n📊 CALCULATING DATA RANGES FOR RANGE-AWARE TRAINING")
+        
+        # Calculate input ranges (per feature)
+        input_ranges = []
+        for i in range(num_features):
+            feature_min = np.min(x_train_s[:, i])
+            feature_max = np.max(x_train_s[:, i])
+            input_ranges.append((feature_min, feature_max))
+            print(f"   Input {i+1} ({feature_cols[i]}): [{feature_min:.3f}, {feature_max:.3f}]")
+        
+        # Calculate output ranges (per target)
+        output_ranges = []
+        target_means = []
+        target_stds = []
+        for i in range(num_outputs):
+            target_min = np.min(y_train[:, i])
+            target_max = np.max(y_train[:, i])
+            target_mean = np.mean(y_train[:, i])
+            target_std = np.std(y_train[:, i])
+            
+            output_ranges.append((target_min, target_max))
+            target_means.append(target_mean)
+            target_stds.append(target_std)
+            print(f"   Output {i+1} ({target_cols[i]}): [{target_min:.3f}, {target_max:.3f}] (mean={target_mean:.3f}, std={target_std:.3f})")
+        
+        # Initialize range-aware loss system with REAL data statistics
+        # Set to False to test without distribution-aware loss
+        USE_DISTRIBUTION_AWARE = True  # Change to False to disable distribution-aware loss
+        
+        range_aware_loss = RangeAwareLoss(
+            input_ranges=input_ranges,
+            output_ranges=output_ranges,
+            range_weight=0.5,  # 50% weight for range penalty
+            distribution_aware=USE_DISTRIBUTION_AWARE,
+            target_means=target_means,  # Pass actual means
+            target_stds=target_stds     # Pass actual stds
+        )
         
         # 3.6) Create anchor set for faithfulness system
         anchor_set = AnchorSet(x_train_s, y_train, anchor_size=CALIBRATION_ANCHOR_SIZE)
@@ -1942,27 +2243,36 @@ def main():
         
         # Weight decay is already set in optimizer, no need for callback
 
-        # 6) Compile with moderate regularization loss
-        def regularized_faithfulness_loss(task_weights, faithfulness_weight=0.1, l1_weight=0.001, l2_weight=0.001):
+        # 6) Compile with RANGE-AWARE loss (NEW APPROACH!)
+        def range_aware_regularized_loss(task_weights, l1_weight=0.001, l2_weight=0.001):
             """
-            Enhanced loss function with additional L1/L2 regularization terms
+            Enhanced range-aware loss function with regularization terms.
+            Combines range-aware training with L1/L2 regularization.
             """
             def loss_fn(y_true, y_pred):
-                # Base faithfulness loss
-                base_loss = faithfulness_aware_loss(task_weights, faithfulness_weight)(y_true, y_pred)
+                # Base range-aware loss (NEW!)
+                base_loss = range_aware_loss.create_range_aware_loss(task_weights)(y_true, y_pred)
                 
-                # Add L1/L2 regularization from model weights (more aggressive)
+                # Add L1/L2 regularization from model weights
                 l1_reg = tf.add_n([tf.reduce_sum(tf.abs(w)) for w in model.trainable_weights])
                 l2_reg = tf.add_n([tf.reduce_sum(tf.square(w)) for w in model.trainable_weights])
                 
-                # Combine losses with more aggressive regularization
+                # Combine losses
                 total_loss = base_loss + l1_weight * l1_reg + l2_weight * l2_reg
                 return total_loss
             return loss_fn
         
+        print(f"\n🎯 COMPILING MODEL WITH RANGE-AWARE LOSS")
+        print(f"   📊 Range-aware training enabled")
+        print(f"   📏 Input ranges: {len(input_ranges)} features")
+        print(f"   📏 Output ranges: {len(output_ranges)} targets")
+        print(f"   ⚖️  Range weight: 50% (AGGRESSIVE penalty for out-of-range predictions)")
+        print(f"   🔍 Scale-sensitive: More weight for smaller target values")
+        print(f"   📊 Distribution-aware: Adaptive penalties based on REAL data distribution patterns (weight: 5%)")
+        
         model.compile(
             optimizer=opt,
-            loss=regularized_faithfulness_loss(TASK_WEIGHTS, faithfulness_weight=0.1, l1_weight=0.001, l2_weight=0.001),
+            loss=range_aware_regularized_loss(TASK_WEIGHTS, l1_weight=0.001, l2_weight=0.001),
             # Add stability measures
             jit_compile=False,                   # Disable XLA for stability
             # metrics=['mse']  # Simplified: single metric for all outputs
@@ -2156,11 +2466,41 @@ def main():
         }
         
         all_results.append(dict(fold=fold, architecture=architecture_info, per_target=per_target, test_data=test_data_info))
-        # Pretty print with enhanced faithfulness analysis
+        # Pretty print with enhanced faithfulness analysis + RANGE ANALYSIS
         # NOTE: All performance metrics below are from TEST DATA evaluation (true generalization)
         print("\n" + "="*70)
-        print(f"FOLD {fold} RESULTS - FAITHFULNESS ANALYSIS (TEST DATA)")
+        print(f"FOLD {fold} RESULTS - RANGE-AWARE TRAINING ANALYSIS (TEST DATA)")
         print("="*70)
+        
+        # Show range analysis
+        print(f"\n📊 RANGE ANALYSIS:")
+        for i, target_name in enumerate(target_cols):
+            target_min, target_max = output_ranges[i]
+            target_span = target_max - target_min
+            
+            # Calculate prediction ranges
+            model_min, model_max = np.min(Yhat_nn[:, i]), np.max(Yhat_nn[:, i])
+            model_span = model_max - model_min
+            
+            eq_min, eq_max = np.min(Yhat_eq[:, i]), np.max(Yhat_eq[:, i])
+            eq_span = eq_max - eq_min
+            
+            refit_min, refit_max = np.min(Yhat_eq_refit[:, i]), np.max(Yhat_eq_refit[:, i])
+            refit_span = refit_max - refit_min
+            
+            print(f"   🎯 {target_name}:")
+            print(f"      Truth range: [{target_min:.3f}, {target_max:.3f}] (span: {target_span:.3f})")
+            print(f"      Model range: [{model_min:.3f}, {model_max:.3f}] (span: {model_span:.3f})")
+            print(f"      Raw Eq range: [{eq_min:.3f}, {eq_max:.3f}] (span: {eq_span:.3f})")
+            print(f"      Refit Eq range: [{refit_min:.3f}, {refit_max:.3f}] (span: {refit_span:.3f})")
+            
+            # Range coverage analysis
+            model_coverage = min(100.0, (model_span / target_span) * 100) if target_span > 0 else 0
+            eq_coverage = min(100.0, (eq_span / target_span) * 100) if target_span > 0 else 0
+            refit_coverage = min(100.0, (refit_span / target_span) * 100) if target_span > 0 else 0
+            
+            print(f"      Range coverage: Model={model_coverage:.1f}% | Raw Eq={eq_coverage:.1f}% | Refit Eq={refit_coverage:.1f}%")
+        
         for r in per_target:
             print(f"\n🔍 {r['target']}:")
             print(f"   📊 Model Performance (vs Truth):")

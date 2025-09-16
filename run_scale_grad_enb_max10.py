@@ -150,7 +150,7 @@ VAL_SPLIT = 0.1
 PATIENCE = 10000
 TASK_WEIGHTS = [0.5, 0.5]             # Balanced weights for both outputs
 
-# Faithfulness system parameters (ChatGPT Engineering Plan)
+# Faithfulness system parameters (Engineering Plan)
 FAITHFULNESS_ALPHA = 0.1             # Faithfulness loss weight (0.05-0.2 range)
 FAITHFULNESS_EPOCHS = 50             # How many epochs to apply faithfulness loss
 CALIBRATION_ANCHOR_SIZE = 256        # Size of anchor set for consistent evaluation
@@ -1543,7 +1543,7 @@ class EquationSyncCallback(Callback):
         self.model = model  # Keep model reference for monitoring
         self.anchor_set = anchor_set  # Anchor set for consistent evaluation
         
-        # Faithfulness system state (ChatGPT Engineering Plan)
+        # Faithfulness system state (Engineering Plan)
         self.faithfulness_phase = 'normal'  # 'normal', 'faithfulness', 'fine_tune'
         self.faithfulness_epochs_remaining = 0
         self.calibrated_equations = None

@@ -3,6 +3,7 @@
 """
 GINN multi-output training + equation extraction + periodic "equation sync"
 (one-file runner; no scaling; constant shift for features only)
+CLEANED MERGED DATASET: farmer_advisor + market_researcher data (target_SS, target_CTI) with categorical features removed
 
 ENHANCED REGULARIZATION FOR OVERFITTING REDUCTION:
   • Advanced data augmentation: noise injection + mixup + feature dropout
@@ -22,7 +23,7 @@ What this does:
       - Optionally refits ONLY numeric constants in the printed equations
         to better match your data (structure/exponents fixed)
       - Reports R²/MAE/RMSE and faithfulness R²(model ↔ equation)
-  • Uses MinMaxScaler [0.1, data_max] for features only (targets kept original).
+  • Uses constant shift (+0.05) for features only (targets kept original).
 
 FIXED: Surrogate equation conversion errors that caused raw equations to fail.
 - HIGH PRECISION conversion (12-16 decimal places)
@@ -56,7 +57,6 @@ from sympy.parsing.sympy_parser import parse_expr
 from sklearn.model_selection import KFold
 from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
 # Removed scipy.signal import since we're not using Savitzky-Golay smoothing anymore
-from sklearn.preprocessing import MinMaxScaler
 
 # --- TF / GINN ---
 import tensorflow as tf
@@ -113,7 +113,7 @@ else:
 # --- END: GPU Memory Limits ---
 
 # =============== USER CONFIG ===============
-DATA_CSV = "data/ENB2012_data.csv"   # <--- change to your dataset file
+DATA_CSV = "data/prepared/merged_stratified_1k_cleaned.csv"   # <--- cleaned dataset with categorical features removed
 
 # Auto-generate output filename based on dataset name and architecture
 def get_output_filename(dataset_path):
@@ -126,10 +126,10 @@ def get_output_filename(dataset_path):
     blocks_per_layer = LN_BLOCKS_SHARED[0] if LN_BLOCKS_SHARED else 0  # PTA blocks per layer
     output_blocks = OUTPUT_LN_BLOCKS  # Output layer blocks
     
-    return f"outputs/JSON_ENB_scaled/grad_{first_three}_{num_layers}S_{blocks_per_layer}B_{output_blocks}L_scaled_datamax.json"
+    return f"outputs/JSON_ENB_shifted/grad_CLEAN_{num_layers}S_{blocks_per_layer}B_{output_blocks}L_shifted.json"
 
-# If you know exact target col names, set them here (otherwise auto-detect below).
-TARGET_COLS = None                    # e.g. ["Y1","Y2"] or leave None to auto-detect
+# Target columns for merged dataset (updated to new column names)
+TARGET_COLS = ["target_SS", "target_CTI"]  # Updated to GINN-friendly column names
 K_FOLDS = 1                          # Use single fold while debugging faithfulness
 VALIDATE_EVERY = 200                  # equation sync every N epochs (200 for faster feedback)
 ROUND_DIGITS = 3
@@ -138,9 +138,9 @@ MIN_POSITIVE = 1e-2                   # clamp after smoothing to avoid zeros/neg
 EPS_LAURENT = 1e-12
 
 # GINN architecture (your description)
-LN_BLOCKS_SHARED = (6, )             # 1 shared layer with 8 PTA blocks
-LIN_BLOCKS_SHARED = (1, )            # must match per GINN builder
-OUTPUT_LN_BLOCKS = 6                  # you said “their own four” per head; set 4
+LN_BLOCKS_SHARED = (8, 8,)             # 1 shared layer with 8 PTA blocks
+LIN_BLOCKS_SHARED = (1, 1,)            # must match per GINN builder
+OUTPUT_LN_BLOCKS = 8                  # you said “their own four” per head; set 4
 L1 = 1e-3; L2 = 1e-3
 OUT_L1 = 0.2; OUT_L2 = 0.1
 INIT_LR = 1e-4; DECAY_STEPS = 1000  # Conservative learning rate for stability
@@ -215,30 +215,23 @@ def detect_features_and_targets(df, override=None):
     return fcols, tcols
 
 
-def scale_features_minmax(X, min_positive=MIN_POSITIVE):
+def shift_positive(X, shift_amount=0.05, min_positive=MIN_POSITIVE):
     """
-    Apply MinMaxScaler to features with data-driven range [0.1, max_value]; then clamp to strictly positive floor.
-    Only works for features (X), not targets (Y).
+    Apply a constant shift to all features; then clamp to strictly positive floor.
+    Works for both features (X) and targets (Y).
     """
     arr = np.asarray(X, dtype=float).copy()
+    n, d = arr.shape
     
-    # Find the maximum value in the data to set appropriate range
-    max_val = np.max(arr)
-    # Use 0.1 as minimum and the ACTUAL maximum as the upper bound
-    target_max = max_val
-    
-    print(f"   📊 Data range: [{np.min(arr):.3f}, {max_val:.3f}]")
-    print(f"   🎯 Scaling to: [0.1, {target_max:.3f}]")
-    
-    # Apply MinMaxScaler to scale features to [0.1, target_max] range
-    scaler = MinMaxScaler(feature_range=(0.1, target_max))
-    arr_scaled = scaler.fit_transform(arr)
+    # Apply shift to all features
+    for j in range(d):
+        arr[:, j] = arr[:, j] + shift_amount
     
     # clamp: (i) avoid true zeros, (ii) avoid negatives for Laurent stability
-    arr_scaled = np.where(np.isfinite(arr_scaled), arr_scaled, 0.0)
-    arr_scaled = np.sign(arr_scaled) * np.maximum(np.abs(arr_scaled), EPS_LAURENT)   # avoid exact 0
-    arr_scaled = np.maximum(arr_scaled, min_positive)                         # enforce positive domain
-    return arr_scaled
+    arr = np.where(np.isfinite(arr), arr, 0.0)
+    arr = np.sign(arr) * np.maximum(np.abs(arr), EPS_LAURENT)   # avoid exact 0
+    arr = np.maximum(arr, min_positive)                         # enforce positive domain
+    return arr
 
 
 # ---------- SymPy helpers (robust evaluation + coeff refit) ----------
@@ -1819,16 +1812,21 @@ class FaithfulnessTrainingWrapper:
 # - Dynamic loss switching: Normal ↔ Faithfulness based on phase
 # - Automatic phase management: Training stops when criteria met
 def main():
-    # 1) Load data (same as MTR-enb.ipynb)
+    # 1) Load merged dataset (full dataset, no sampling)
+    print("Loading cleaned dataset from remove_categorical_features.py...")
     df = pd.read_csv(DATA_CSV)
-    # Drop NULLs (if any) - same as MTR-enb.ipynb
+    # Drop NULLs (if any)
     df.dropna(inplace=True)
+    
+    print(f"Loaded cleaned dataset shape: {df.shape}")
+    print(f"Dataset columns: {list(df.columns)}")
     
     feature_cols, target_cols = detect_features_and_targets(df, override=TARGET_COLS)
     num_features = len(feature_cols)
     num_outputs = len(target_cols)
     print(f"Features: {feature_cols}")
     print(f"Targets:  {target_cols}  (num_outputs={num_outputs})")
+    print(f"Using cleaned dataset (categorical features removed): {len(df)} samples")
 
     # 2) Apply same split as MTR-enb.ipynb (seed=100, 80/20 split)
     # First shuffle the data like in MTR-enb.ipynb
@@ -1851,17 +1849,24 @@ def main():
         X_train, X_test = X_shuffled[tr], X_shuffled[te]
         Y_train, Y_test = Y_shuffled[tr], Y_shuffled[te]
 
-        # 3) MinMaxScaler + positivity clamp; NO SCALING
-        # Use MinMaxScaler for FEATURES ONLY (same as scaling approach)
-        print(f"\n🔧 Using MinMaxScaler for FEATURES ONLY")
-        x_train_s = scale_features_minmax(X_train)  # MinMaxScaler to [0.1, data_max] range
-        y_train = Y_train                   # Targets NOT scaled (same as scaling approach)
-        x_test_s  = scale_features_minmax(X_test)
-        y_test  = Y_test                    # Targets NOT scaled (same as scaling approach)
+        # 3) CATEGORICAL FEATURES ALREADY REMOVED
+        # The cleaned dataset already has categorical features removed
+        print(f"\n✅ Using cleaned dataset - categorical features already removed")
+        print(f"   Features available: {feature_cols}")
+        print(f"   Number of features: {num_features}")
+        print(f"   Note: X_CT (Crop_Type) and X_Season (Seasonal_Factor) already removed")
+        
+        # 4) Shift (constant +0.05) + positivity clamp; NO SCALING
+        # Use standard shift for FEATURES ONLY (same as scaling approach)
+        print(f"\n🔧 Using constant shift (+0.05) for FEATURES ONLY")
+        x_train_s = shift_positive(X_train)  # Default: shift=0.05
+        y_train = Y_train                   # Targets NOT shifted (same as scaling approach)
+        x_test_s  = shift_positive(X_test)
+        y_test  = Y_test                    # Targets NOT shifted (same as scaling approach)
         
         print(f"   x_train_s shape: {x_train_s.shape}, range: [{np.min(x_train_s):.3f}, {np.max(x_train_s):.3f}]")
         print(f"   y_train shape: {y_train.shape}, range: [{np.min(y_train):.3f}, {np.max(y_train):.3f}]")
-        print(f"   ✅ Only features scaled, targets kept original (same as scaling approach)")
+        print(f"   ✅ Only features shifted, targets kept original (same as scaling approach)")
         
         # 3.6) Create anchor set for faithfulness system
         anchor_set = AnchorSet(x_train_s, y_train, anchor_size=CALIBRATION_ANCHOR_SIZE)
